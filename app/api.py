@@ -8,7 +8,7 @@ from werkzeug.exceptions import HTTPException
 
 from . import accounts, cards, merchants, purchases
 from .db import connect
-from .errors import ServiceError
+from .errors import ServiceError, ValidationError
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -99,7 +99,13 @@ def create_deposit(account_id):
 
 @api.post("/accounts/<account_id>/cards")
 def issue_card(account_id):
-    return jsonify(cards.issue_card(conn(), account_id, replace=bool(body().get("replace")))), 201
+    data = body()
+    replace = data.get("replace", False)
+
+    if not isinstance(replace, bool):
+        raise ValidationError("Replace must be true or false.", field="replace")
+
+    return jsonify(cards.issue_card(conn(), account_id, replace=replace)), 201
 
 
 @api.post("/cards/<card_id>/freeze")

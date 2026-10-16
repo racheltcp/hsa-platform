@@ -99,6 +99,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/accounts/{acct['id']}/cards",
                                           json={"replace": True}).status_code, 201)
 
+    def test_replace_card_requires_a_boolean(self):
+        acct, card = self.setup_account()
+
+        r = self.client.post(
+            f"/api/accounts/{acct['id']}/cards",
+            json={"replace": "false"},
+        )
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.get_json()["error"]["field"], "replace")
+
+        detail = self.client.get(f"/api/accounts/{acct['id']}").get_json()
+        self.assertEqual(detail["card"]["id"], card["id"])
+        self.assertEqual(detail["card"]["status"], "active")
+
+        r = self.client.post(
+            f"/api/accounts/{acct['id']}/cards",
+            json={"replace": True},
+        )
+        self.assertEqual(r.status_code, 201)
+        self.assertNotEqual(r.get_json()["id"], card["id"])
+
     def test_merchant_categories(self):
         cats = {c["mcc"]: c["qualified"] for c in self.client.get("/api/merchant-categories").get_json()}
         self.assertEqual((cats["5912"], cats["8062"], cats["5812"], cats["5732"]), (True, True, False, False))
