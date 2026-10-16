@@ -4,6 +4,7 @@ Note: a *declined* purchase is not an error. It is a normal business outcome
 and is returned as a transaction with status "declined". Errors are for
 requests that are malformed or reference things that do not exist.
 """
+from __future__ import annotations
 
 
 class ServiceError(Exception):

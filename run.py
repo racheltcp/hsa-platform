@@ -3,8 +3,8 @@ import argparse
 import sqlite3
 import sys
 
-if sys.version_info < (3, 10) or sqlite3.sqlite_version_info < (3, 35):
-    sys.exit(f"This app needs Python 3.10+ with SQLite 3.35+. You have Python "
+if sys.version_info < (3, 9) or sqlite3.sqlite_version_info < (3, 35):
+    sys.exit(f"This app needs Python 3.9+ with SQLite 3.35+. You have Python "
              f"{sys.version.split()[0]} with SQLite {sqlite3.sqlite_version}.")
 
 from app import create_app  # noqa: E402

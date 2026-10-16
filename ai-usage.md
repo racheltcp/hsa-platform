@@ -84,6 +84,12 @@ and that would have been exposed the moment an interviewer asked "what if you re
   a new account but still displayed the previous account's last purchase result and
   "repeat 20" setting. Fixed by resetting per-account UI state in one `selectAccount()`
   function.
+- **Didn't run on a stock Mac.** The code used `str | None` type hints, which need Python
+  3.10+, and was only tested on 3.13. The first run on my MacBook, which ships Python 3.9.6,
+  crashed at import. Fixed with `from __future__ import annotations`. The full test suite
+  and mutation check were then re-run on an actual Python 3.9 interpreter, and `run.py`
+  now checks the Python and SQLite versions up front with a clear message. The same session
+  switched the default port from 5000 to 8000, because macOS's AirPlay Receiver occupies 5000.
 - **Unformatted error message.** The limit error read "$4400.00"; changed to "$4,400.00".
 - **Unverifiable citation.** An early draft of `limits.py` cited specific IRS Revenue
   Procedure numbers from memory. Since I could not verify those numbers, the citation

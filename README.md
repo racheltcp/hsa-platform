@@ -4,7 +4,7 @@ A small Health Savings Account platform: create accounts, deposit funds (within 
 contribution limits), issue virtual debit cards, and authorize card purchases, approving
 only qualified medical expenses and never letting a balance go negative under concurrent load.
 
-- **Backend:** Python 3.10+, Flask, SQLite (stdlib `sqlite3`, no ORM)
+- **Backend:** Python 3.9+, Flask, SQLite (stdlib `sqlite3`, no ORM)
 - **Frontend:** a single page of plain HTML/CSS/JS served by Flask (no build step)
 - **Tests:** stdlib `unittest`, including multi-threaded race tests and a mutation check
 
@@ -26,8 +26,9 @@ To start fresh, stop the server and delete the `data/` folder.
 
 Options: `python run.py --port 9000 --db /path/to/other.db`
 
-Requirements: Python 3.10 or newer (its bundled SQLite must be 3.35+, which every
-official Python 3.10+ build includes; check with `python -c "import sqlite3; print(sqlite3.sqlite_version)"`).
+Requirements: Python 3.9 or newer (including the `python3` that ships with macOS) whose
+SQLite is 3.35+. `run.py` checks both at startup and tells you if either is too old.
+On macOS use `python3`/`pip3` outside the virtual environment; inside it, `python`/`pip` work.
 
 ## Reviewer's tour (about 2 minutes)
 
