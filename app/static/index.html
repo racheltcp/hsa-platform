@@ -3,155 +3,184 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>HSA Simulator</title>
+  <link rel="preload" href="/static/fonts/PublicSans-Regular.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">+</span>
-      <div>
-        <h1>HSA Simulator</h1>
-        <p>Accounts · deposits · virtual cards · purchase authorization</p>
+    <div class="topbar-inner">
+      <a class="wordmark" href="/" aria-label="HSA Simulator home">
+        <svg viewBox="0 0 28 28" width="28" height="28" aria-hidden="true">
+          <rect x="1" y="5" width="26" height="18" rx="3.5" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M14 9.5v9M9.5 14h9" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        </svg>
+        <span>HSA Simulator</span>
+      </a>
+      <div class="switcher" id="switcher" hidden>
+        <label for="account-select" class="visually-hidden">Account</label>
+        <select id="account-select"></select>
+        <button class="btn quiet" id="btn-new-account" type="button">New account</button>
       </div>
+      <button class="btn race-cta" id="btn-scenario" type="button">Run the $100 race</button>
     </div>
-    <button class="btn ghost" id="btn-scenario" title="Creates a fresh $100 account and fires $80 and $50 purchases at the same time">
-      Run the $100 / $80 + $50 race
-    </button>
   </header>
 
-  <div class="layout">
-    <!-- Sidebar: accounts -->
-    <aside class="sidebar">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>New account</h2>
+  <!-- First run -->
+  <main id="welcome" class="welcome" hidden>
+    <div class="welcome-copy">
+      <h1>Watch an HSA card decide, one purchase at a time.</h1>
+      <p>Create an account, add money, issue a virtual card, and swipe it at pharmacies, hospitals and restaurants. Each purchase shows the checks it went through. Fire several at once and watch them queue for the account's lock, so the balance can never go below zero.</p>
+      <div class="welcome-actions">
+        <button class="btn primary large" data-action="scenario" type="button">Run the $100 race</button>
+        <button class="btn large" data-action="new-account" type="button">Create an account</button>
+      </div>
+      <p class="fineprint">The race creates an account with $100 and sends an $80 and a $50 pharmacy purchase at the same moment. Only one can be approved.</p>
+    </div>
+    <figure class="welcome-figure" aria-label="Example race result">
+      <div class="tl-legend" aria-hidden="true">
+        <span><i class="sw wait"></i>Waiting for the lock</span>
+        <span><i class="sw hold"></i>Holding it</span>
+      </div>
+      <div class="tl-grid timeline play" aria-hidden="true">
+        <div class="tl-row" style="--d:.2s">
+          <div class="tl-name"><b>$80.00</b><span>1st</span></div>
+          <div class="tl-track"><span class="seg wait" style="left:0;width:3%;--d:.2s"></span><span class="seg hold ok" style="left:3%;width:38%;--d:.35s"></span></div>
+          <div class="tl-out"><b class="ok">Approved</b><span>$20.00 left</span></div>
         </div>
-        <form id="form-account" class="stack" autocomplete="off">
-          <label>Full name<input name="holder_name" required maxlength="100" placeholder="Jordan Lee"></label>
-          <label>Email<input name="email" type="email" required placeholder="jordan@example.com"></label>
-          <div class="row2">
-            <label>Date of birth<input name="date_of_birth" type="date" required value="1990-04-12"></label>
-            <label>HDHP coverage
-              <select name="coverage_type">
-                <option value="self_only">Self-only</option>
-                <option value="family">Family</option>
-              </select>
-            </label>
+        <div class="tl-row" style="--d:.6s">
+          <div class="tl-name"><b>$50.00</b><span>2nd</span></div>
+          <div class="tl-track"><span class="seg wait" style="left:1%;width:47%;--d:.6s"></span><span class="seg hold no" style="left:48%;width:36%;--d:.75s"></span></div>
+          <div class="tl-out"><b class="no">Declined</b><span>Not enough money</span></div>
+        </div>
+      </div>
+      <figcaption>An example result. Both purchases arrive together. The $50 one waits while the $80 one holds the lock, then sees only $20 left.</figcaption>
+    </figure>
+  </main>
+
+  <!-- Account workspace -->
+  <main id="workspace" class="workspace" hidden>
+    <section class="account-bar" aria-labelledby="acct-name">
+      <div class="who">
+        <h1 id="acct-name"></h1>
+        <p id="acct-meta" class="meta"></p>
+      </div>
+      <div class="balance">
+        <span class="label">Available balance</span>
+        <output id="acct-balance" class="balance-figure"></output>
+      </div>
+      <div class="limit">
+        <span class="label" id="limit-label"></span>
+        <div class="meter" role="meter" id="limit-meter" aria-valuemin="0"><span id="limit-bar"></span></div>
+        <span class="meta" id="limit-text"></span>
+      </div>
+    </section>
+
+    <div class="desk">
+      <!-- Left: card and money in -->
+      <section class="column" aria-labelledby="h-card">
+        <h2 id="h-card">Card</h2>
+        <div class="surface">
+          <div id="card-visual" class="card-visual"></div>
+          <p id="card-once" class="callout" hidden></p>
+          <div class="btn-row" id="card-actions"></div>
+        </div>
+
+        <h2 id="h-deposit">Add money</h2>
+        <form id="form-deposit" class="surface stack" aria-labelledby="h-deposit">
+          <label class="field">Amount
+            <span class="money"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="100.00" autocomplete="off"></span>
+          </label>
+          <div class="quick" id="deposit-quick" aria-label="Quick amounts">
+            <button type="button" class="chip" data-amount="25">$25</button>
+            <button type="button" class="chip" data-amount="100">$100</button>
+            <button type="button" class="chip" data-amount="500">$500</button>
           </div>
-          <button class="btn primary" type="submit">Create account</button>
+          <button class="btn primary" type="submit">Deposit</button>
+          <p class="meta" id="deposit-hint">Deposits count toward this year's IRS contribution limit.</p>
         </form>
       </section>
 
-      <section class="panel">
-        <div class="panel-head"><h2>Accounts</h2><span class="muted" id="account-count"></span></div>
-        <ul id="account-list" class="account-list"></ul>
-      </section>
-    </aside>
-
-    <!-- Main -->
-    <main class="main">
-      <div id="empty-state" class="empty">
-        <h2>No account selected</h2>
-        <p>Create an account on the left, or run the race scenario above to see concurrent purchase handling in one click.</p>
-      </div>
-
-      <div id="account-view" hidden>
-        <section class="summary panel">
-          <div>
-            <p class="eyebrow" id="acct-id"></p>
-            <h2 id="acct-name"></h2>
-            <p class="muted" id="acct-meta"></p>
-          </div>
-          <div class="balance">
-            <p class="eyebrow">Available balance</p>
-            <p class="big" id="acct-balance"></p>
-          </div>
-          <div class="limit">
-            <p class="eyebrow" id="limit-label"></p>
-            <div class="meter"><div id="limit-bar"></div></div>
-            <p class="muted small" id="limit-text"></p>
-          </div>
-        </section>
-
-        <div class="grid2">
-          <!-- Card -->
-          <section class="panel">
-            <div class="panel-head"><h2>Virtual debit card</h2><span id="card-status-chip"></span></div>
-            <div id="card-visual" class="card-visual"></div>
-            <p id="card-once" class="note" hidden></p>
-            <div class="btn-row" id="card-actions"></div>
-          </section>
-
-          <!-- Deposit -->
-          <section class="panel">
-            <div class="panel-head"><h2>Deposit funds</h2></div>
-            <form id="form-deposit" class="stack">
-              <label>Amount (USD)
-                <div class="money"><span>$</span><input name="amount" inputmode="decimal" required placeholder="100.00"></div>
-              </label>
-              <div class="chips" id="deposit-quick">
-                <button type="button" class="chip" data-amount="25">$25</button>
-                <button type="button" class="chip" data-amount="100">$100</button>
-                <button type="button" class="chip" data-amount="500">$500</button>
-              </div>
-              <button class="btn primary" type="submit">Deposit</button>
-            </form>
-            <p class="muted small">Deposits count toward the IRS annual contribution limit for the current tax year.</p>
-          </section>
-        </div>
-
-        <!-- Purchase simulator -->
-        <section class="panel">
-          <div class="panel-head"><h2>Simulate a card purchase</h2></div>
-          <div class="chips" id="merchant-presets"></div>
+      <!-- Right: authorize a purchase -->
+      <section class="column wide" aria-labelledby="h-purchase">
+        <h2 id="h-purchase">Swipe the card</h2>
+        <div class="surface">
+          <div class="merchants" id="merchant-presets" role="group" aria-label="Example merchants"></div>
           <form id="form-purchase" class="purchase-form">
-            <label>Merchant name<input name="merchant_name" required maxlength="100"></label>
-            <label>Merchant category (MCC)<select name="mcc" id="mcc-select"></select></label>
-            <label>Amount
-              <div class="money"><span>$</span><input name="amount" inputmode="decimal" required placeholder="25.00"></div>
+            <label class="field">Merchant<input name="merchant_name" required maxlength="100" autocomplete="off"></label>
+            <label class="field">Category<select name="mcc" id="mcc-select"></select></label>
+            <label class="field">Amount
+              <span class="money"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="25.00" autocomplete="off"></span>
             </label>
             <button class="btn primary" type="submit">Swipe card</button>
           </form>
-          <div id="purchase-result"></div>
-        </section>
-
-        <!-- Concurrency lab -->
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Concurrency lab</h2>
-            <span class="muted small">Sends every purchase at the same moment against this account's card</span>
+          <div id="slip-area" class="slip-area">
+            <p class="slip-empty">Swipe the card to see each check the purchase goes through.</p>
           </div>
-          <form id="form-race" class="race-form">
-            <label>Amounts (comma-separated)<input name="amounts" value="80, 50"></label>
-            <label>Repeat each
-              <input name="repeat" type="number" min="1" max="50" value="1">
-            </label>
-            <label>Category
-              <select name="mcc">
-                <option value="5912">Pharmacy (qualified)</option>
-                <option value="8062">Hospital (qualified)</option>
-                <option value="5812">Restaurant (not qualified)</option>
-              </select>
-            </label>
-            <button class="btn primary" type="submit">Fire simultaneously</button>
-          </form>
-          <div id="race-result"></div>
-        </section>
+        </div>
+      </section>
+    </div>
 
-        <!-- Activity -->
-        <section class="panel">
-          <div class="panel-head"><h2>Activity</h2><span class="muted small">Newest first · approved and declined</span></div>
-          <div class="table-wrap">
-            <table class="activity">
-              <thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Result</th><th class="num">Amount</th><th class="num">Balance after</th></tr></thead>
-              <tbody id="activity-body"></tbody>
-            </table>
-          </div>
-        </section>
+    <!-- Race -->
+    <section class="race" aria-labelledby="h-race">
+      <div class="race-head">
+        <h2 id="h-race">Race purchases against the lock</h2>
+        <p class="meta">Every purchase below is sent at the same instant. The server lets one at a time hold the account's lock, so each sees the balance the previous one left.</p>
       </div>
-    </main>
-  </div>
+      <div class="surface">
+        <form id="form-race" class="race-form">
+          <label class="field">Amounts, separated by commas<input name="amounts" value="80, 50" autocomplete="off"></label>
+          <label class="field">Send each<span class="suffix-input"><input name="repeat" type="number" min="1" max="50" value="1"><span>times</span></span></label>
+          <label class="field">At
+            <select name="mcc">
+              <option value="5912">Corner Pharmacy (qualified)</option>
+              <option value="8062">St. Mercy Hospital (qualified)</option>
+              <option value="5812">Trattoria Roma (not qualified)</option>
+            </select>
+          </label>
+          <button class="btn primary" type="submit">Send all at once</button>
+        </form>
+        <div id="contention" class="contention" aria-live="polite"></div>
+        <div id="race-result"></div>
+      </div>
+    </section>
+
+    <!-- Ledger -->
+    <section class="ledger" aria-labelledby="h-ledger">
+      <h2 id="h-ledger">Ledger</h2>
+      <div class="surface flush">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Time</th><th scope="col">What happened</th><th scope="col">Result</th><th scope="col" class="num">Amount</th><th scope="col" class="num">Balance after</th></tr></thead>
+            <tbody id="activity-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="dialog-account" aria-labelledby="h-new-account">
+    <form id="form-account" class="stack" method="dialog" autocomplete="off">
+      <h2 id="h-new-account">New HSA account</h2>
+      <label class="field">Full name<input name="holder_name" required maxlength="100" placeholder="Jordan Lee"></label>
+      <label class="field">Email<input name="email" type="email" required placeholder="jordan@example.com"></label>
+      <div class="two">
+        <label class="field">Date of birth<input name="date_of_birth" type="date" required value="1990-04-12"></label>
+        <label class="field">Health plan coverage
+          <select name="coverage_type">
+            <option value="self_only">Just me</option>
+            <option value="family">Family</option>
+          </select>
+        </label>
+      </div>
+      <p class="meta">Coverage and age set the yearly IRS contribution limit: $4,400 for just you or $8,750 for a family in 2026, plus $1,000 at 55 or older.</p>
+      <div class="btn-row end">
+        <button class="btn" type="button" value="cancel" id="btn-cancel-account">Cancel</button>
+        <button class="btn primary" type="submit" value="create">Create account</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <script src="/static/app.js"></script>

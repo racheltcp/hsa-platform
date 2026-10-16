@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import secrets
 import sqlite3
+import time
 from datetime import date, datetime, timezone
 from typing import Callable
 
@@ -132,8 +133,54 @@ def transaction_to_dict(row: sqlite3.Row) -> dict:
         "decline_message": DECLINE_MESSAGES.get(row["decline_reason"]),
         "balance_after": fmt(row["balance_after_cents"]),
         "balance_after_cents": row["balance_after_cents"],
+        "decision": decision_trace(row),
         "created_at": row["created_at"],
     }
+
+
+# Authorization checks, in the order process_transaction evaluates them.
+# (key, what the check asserts, decline reasons that mean this check failed)
+AUTH_CHECKS = [
+    ("card_active", "Card is active", (DeclineReason.CARD_FROZEN, DeclineReason.CARD_CANCELLED)),
+    ("card_not_expired", "Card is not expired", (DeclineReason.CARD_EXPIRED,)),
+    ("account_open", "Account is open", (DeclineReason.ACCOUNT_CLOSED,)),
+    ("qualified_merchant", "Merchant is a qualified medical expense",
+     (DeclineReason.NOT_QUALIFIED_MEDICAL_EXPENSE,)),
+    ("sufficient_funds", "Balance covers the amount", (DeclineReason.INSUFFICIENT_FUNDS,)),
+]
+
+
+def decision_trace(row: sqlite3.Row) -> list[dict]:
+    """Reconstruct the ordered list of checks for a stored transaction.
+
+    Checks run in a fixed order and stop at the first failure, so the stored
+    decline_reason fully determines the trace: everything before the failing
+    check passed, everything after it was never evaluated. No extra columns needed.
+    """
+    reason = row["decline_reason"]
+    category = f"{merchants.describe(row['mcc'])} (MCC {row['mcc']})"
+    amount, balance = fmt_usd(row["amount_cents"]), fmt_usd(row["balance_after_cents"])
+    details = {
+        "card_active": {"passed": "Card was active",
+                        "failed": DECLINE_MESSAGES.get(reason, "")},
+        "card_not_expired": {"passed": "Card was within its expiry date",
+                             "failed": "Card was past its expiry date"},
+        "account_open": {"passed": "Account was open", "failed": "Account was closed"},
+        "qualified_merchant": {"passed": f"{category} is on the medical allow-list",
+                               "failed": f"{category} is not on the medical allow-list"},
+        "sufficient_funds": {"passed": f"Debited {amount}, leaving {balance}",
+                             "failed": f"Needed {amount}, but the balance was {balance}"},
+    }
+    trace, failed_already = [], False
+    for key, label, reasons in AUTH_CHECKS:
+        if failed_already:
+            status, detail = "skipped", "Not checked because an earlier check failed"
+        elif reason in reasons:
+            status, detail, failed_already = "failed", details[key]["failed"], True
+        else:
+            status, detail = "passed", details[key]["passed"]
+        trace.append({"check": key, "label": label, "status": status, "detail": detail})
+    return trace
 
 
 def deposit_to_dict(row: sqlite3.Row) -> dict:
@@ -226,18 +273,20 @@ def list_accounts(conn: sqlite3.Connection) -> list[dict]:
 
 def list_activity(conn: sqlite3.Connection, account_id: str, limit: int = 100) -> list[dict]:
     _get_account_row(conn, account_id)
+    # rowid breaks ties within the same millisecond: writes are serialised, so
+    # insertion order is commit order.
     deposits = conn.execute(
-        "SELECT * FROM deposits WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
-        (account_id, limit),
+        "SELECT rowid AS seq, * FROM deposits WHERE account_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT ?", (account_id, limit),
     ).fetchall()
     txns = conn.execute(
-        "SELECT * FROM transactions WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
-        (account_id, limit),
+        "SELECT rowid AS seq, * FROM transactions WHERE account_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT ?", (account_id, limit),
     ).fetchall()
-    items = [{"kind": "deposit", **deposit_to_dict(d)} for d in deposits]
-    items += [{"kind": "purchase", **transaction_to_dict(t)} for t in txns]
-    items.sort(key=lambda i: i["created_at"], reverse=True)
-    return items[:limit]
+    items = [({"kind": "deposit", **deposit_to_dict(d)}, d["seq"]) for d in deposits]
+    items += [({"kind": "purchase", **transaction_to_dict(t)}, t["seq"]) for t in txns]
+    items.sort(key=lambda pair: (pair[0]["created_at"], pair[1]), reverse=True)
+    return [item for item, _ in items[:limit]]
 
 
 # --------------------------------------------------------------------------- deposits
@@ -372,7 +421,9 @@ def process_transaction(conn: sqlite3.Connection, data: dict) -> tuple[dict, boo
     amount_cents = parse_amount(data.get("amount"))
     key = _optional_key(data)
 
+    received_at = time.time()
     with write_transaction(conn):
+        lock_acquired_at = time.time()          # BEGIN IMMEDIATE has returned: we hold the lock
         existing = conn.execute(
             "SELECT * FROM transactions WHERE idempotency_key = ?", (key,)
         ).fetchone()
@@ -415,7 +466,21 @@ def process_transaction(conn: sqlite3.Connection, data: dict) -> tuple[dict, boo
              "approved" if reason is None else "declined", reason, balance_after, _now_iso()),
         )
         row = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
-    return transaction_to_dict(row), False
+        decided_at = time.time()                # last statement done; COMMIT comes next
+    committed_at = time.time()                  # COMMIT has returned: lock released
+
+    txn = transaction_to_dict(row)
+    # Diagnostics for this request only (not persisted): how long it queued for
+    # the write lock and how long it held it. Epoch milliseconds.
+    txn["processing"] = {
+        "received_at_ms": received_at * 1000,
+        "lock_acquired_at_ms": lock_acquired_at * 1000,
+        "decided_at_ms": decided_at * 1000,
+        "committed_at_ms": committed_at * 1000,
+        "lock_wait_ms": round((lock_acquired_at - received_at) * 1000, 3),
+        "lock_held_ms": round((committed_at - lock_acquired_at) * 1000, 3),
+    }
+    return txn, False
 
 
 def _decline_reason(card: sqlite3.Row, account: sqlite3.Row, mcc: str) -> str | None:

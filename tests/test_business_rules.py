@@ -211,6 +211,33 @@ class TransactionTests(DbTestCase):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
                 services.process_transaction(self.conn, data)
 
+    def test_decision_trace_matches_outcome(self):
+        acct, card = self.make_account("20")
+        ok = self.purchase(card, "5")
+        self.assertEqual([c["status"] for c in ok["decision"]], ["passed"] * 5)
+        self.assertIn("leaving $15.00", ok["decision"][-1]["detail"])
+
+        food = self.purchase(card, "5", mcc="5812")
+        self.assertEqual([c["status"] for c in food["decision"]],
+                         ["passed", "passed", "passed", "failed", "skipped"])
+        self.assertIn("Restaurants (MCC 5812)", food["decision"][3]["detail"])
+
+        broke = self.purchase(card, "50")
+        self.assertEqual(broke["decision"][-1]["status"], "failed")
+        self.assertIn("Needed $50.00, but the balance was $15.00", broke["decision"][-1]["detail"])
+
+        services.set_card_status(self.conn, card["id"], "frozen")
+        frozen = self.purchase(card, "1")
+        self.assertEqual([c["status"] for c in frozen["decision"]],
+                         ["failed"] + ["skipped"] * 4)
+
+    def test_processing_timings_are_reported(self):
+        _, card = self.make_account("10")
+        p = self.purchase(card, "1")["processing"]
+        self.assertLessEqual(p["received_at_ms"], p["lock_acquired_at_ms"])
+        self.assertLessEqual(p["lock_acquired_at_ms"], p["decided_at_ms"])
+        self.assertLessEqual(p["decided_at_ms"], p["committed_at_ms"])
+
     def test_database_rejects_negative_balance_even_if_app_logic_is_bypassed(self):
         acct, _ = self.make_account("10")
         import sqlite3

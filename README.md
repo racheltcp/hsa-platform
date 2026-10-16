@@ -32,26 +32,30 @@ On macOS use `python3`/`pip3` outside the virtual environment; inside it, `pytho
 
 ## Reviewer's tour (about 2 minutes)
 
-1. **Click "Run the $100 / $80 + $50 race"** (top right). This creates a fresh account,
-   deposits $100, issues a card, then fires an $80 and a $50 pharmacy purchase *at the same
-   moment*. Exactly one is approved, the other is declined for insufficient funds, and the
-   ledger check confirms the balance is never negative. Click it a few times: which purchase
-   wins depends on arrival order, and both outcomes are correct.
-2. **Create an account** in the left panel (name, email, date of birth, HDHP coverage type).
+1. **Click "Run the $100 race"** (top right). This creates a fresh account, deposits $100,
+   issues a card, then fires an $80 and a $50 pharmacy purchase *at the same moment*. Exactly
+   one is approved. The timeline shows, with timings measured on the server, the second
+   purchase waiting for the account's lock while the first holds it, then seeing only $20
+   left. Click it a few times: which purchase wins depends on arrival order, and both
+   outcomes are correct.
+2. **Create an account** with "New account" (name, email, date of birth, health plan coverage).
 3. **Deposit funds.** Try depositing more than $4,400 in total on a self-only account to see
    the IRS annual limit enforced.
 4. **Issue a virtual card.** The full number is shown once; only the last 4 digits are stored.
-5. **Simulate purchases** with the merchant presets: Pharmacy, Hospital, Dentist and
-   Eyeglasses are approved; Restaurant, Electronics and Grocery are declined as non-qualified.
+5. **Swipe the card** using the merchant presets: Pharmacy, Hospital, Dentist and
+   Eyeglasses are approved; Restaurant, Electronics and Grocery are declined. Each swipe
+   prints a slip listing the five checks in order and which one failed.
 6. **Freeze the card** and try another purchase (declined: card frozen). Unfreeze to resume.
-7. **Concurrency lab:** e.g. amounts `10`, repeat `20` against a $100 balance. All 20 fire
-   simultaneously; exactly 10 are approved.
-8. The **Activity** table shows every deposit and every purchase attempt, approved or declined.
+7. **Race purchases against the lock:** e.g. amounts `10`, sent `20` times against a $100
+   balance; exactly 10 are approved. If the amounts you enter fit inside the balance, the
+   page says so and offers amounts that force a real race.
+8. The **Ledger** lists every deposit and every purchase attempt; "Show checks" expands
+   any purchase's decision trace.
 
 ## Run the tests
 
 ```bash
-python -m unittest discover -s tests -t . -v      # 39 tests, ~5 seconds
+python -m unittest discover -s tests -t . -v      # 42 tests, ~5 seconds
 python scripts/mutation_check.py                  # proves the race tests can catch races
 ```
 
@@ -113,7 +117,7 @@ app/
   merchants.py     MCC allow-list for qualified medical expenses
   limits.py        IRS annual contribution limits
   money.py         Dollar string <-> integer cents
-  static/          index.html, app.js, styles.css
+  static/          index.html, app.js, styles.css, fonts/ (Public Sans, bundled; OFL)
 tests/
   test_business_rules.py   Single-threaded rules
   test_concurrency.py      Thread races + a naive-implementation control

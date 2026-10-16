@@ -47,6 +47,15 @@ non-qualified purchases, froze the card, exceeded the contribution limit, ran th
 scenario, tried an XSS payload as an account name, and checked a 390px mobile viewport.
 I reviewed the screenshots and the printed results.
 
+**4. "Is this UI the best you can do? It looks generic."** I pushed back on the first UI.
+Claude agreed it was a templated dashboard and proposed changing what the UI *shows*, not
+just how it looks: server-measured lock timings drawn as a per-request timeline, a printed
+decision trace for every purchase, and a race panel that warns when the chosen amounts
+can't produce contention. That last one came from my own screenshot: I ran 80 + 50 against
+a $198.57 balance, both were approved, and the "race" demonstrated nothing. The timeline
+then exposed something none of us had noticed: visible idle gaps between lock holders,
+caused by SQLite's busy-handler backoff, now documented in `architecture.md`.
+
 *TODO: add a prompt of your own, e.g. a follow-up question you asked to understand a piece of the design.*
 
 ## Where AI output was wrong, and how it was corrected
@@ -91,6 +100,10 @@ and that would have been exposed the moment an interviewer asked "what if you re
   now checks the Python and SQLite versions up front with a clear message. The same session
   switched the default port from 5000 to 8000, because macOS's AirPlay Receiver occupies 5000.
 - **Unformatted error message.** The limit error read "$4400.00"; changed to "$4,400.00".
+- **Font loading.** The redesign first loaded Public Sans from Google Fonts. That host was
+  blocked in Claude's sandbox, which also meant the app would silently fall back to system
+  fonts for any reviewer offline. The font (SIL Open Font License) is now bundled in
+  `app/static/fonts/` with its license.
 - **Unverifiable citation.** An early draft of `limits.py` cited specific IRS Revenue
   Procedure numbers from memory. Since I could not verify those numbers, the citation
   was replaced with a plain description; the dollar figures themselves were checked
@@ -100,12 +113,13 @@ and that would have been exposed the moment an interviewer asked "what if you re
 
 ## How I verified the final implementation
 
-1. **Automated tests:** `python -m unittest discover -s tests -t .` runs 39 tests:
+1. **Automated tests:** `python -m unittest discover -s tests -t .` runs 42 tests:
    business rules, API contract, and concurrency (threads released together by a barrier,
    50 rounds of the $100 / $80 + $50 scenario, 40 x $10 against $100, concurrent deposits
    against the limit, concurrent idempotent retries, and 30 simultaneous HTTP requests
    against a real threaded server). Every concurrency test also checks the ledger
-   invariant `balance == deposits - approved purchases`.
+   invariant `balance == deposits - approved purchases`, and one asserts directly from
+   server timings that no two purchases ever hold the lock at the same time.
 2. **Tests of the tests:** the naive-implementation control test, plus
    `python scripts/mutation_check.py` showing the suite fails when any safeguard that
    matters is removed.

@@ -87,6 +87,26 @@ class ConcurrentPurchaseTests(DbTestCase):
         expected = [10000 - 700 * (i + 1) for i in range(len(approved))]
         self.assertEqual([r["balance_after_cents"] for r in approved], expected)
         self.assertEqual(len(approved), 14)  # floor(100 / 7)
+        # The ledger lists approved purchases newest first, i.e. balance climbing back up.
+        listed = [i["balance_after_cents"] for i in services.list_activity(self.conn, acct["id"])
+                  if i["kind"] == "purchase" and i["status"] == "approved"]
+        self.assertEqual(listed, sorted(listed))
+
+    def test_lock_holding_intervals_never_overlap(self):
+        """Direct evidence of serialisation: while one purchase holds the write lock
+        (from BEGIN IMMEDIATE returning until its last statement), no other purchase
+        holds it. Ordering by lock acquisition must also reproduce the balance sequence."""
+        acct, card = self.make_account("100")
+        results = run_concurrently(self._purchase_on_own_connection, [(card["id"], "9")] * 25)
+        spans = sorted((r["processing"]["lock_acquired_at_ms"], r["processing"]["decided_at_ms"], r)
+                       for r in results)
+        for (_, end_a, _), (start_b, _, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(end_a, start_b, "two purchases held the lock at the same time")
+        approved_in_lock_order = [r["balance_after_cents"] for _, _, r in spans
+                                  if r["status"] == "approved"]
+        self.assertEqual(approved_in_lock_order, [10000 - 900 * (i + 1) for i in range(11)])
+        # Some requests really did queue (otherwise the test would not prove much).
+        self.assertGreater(max(r["processing"]["lock_wait_ms"] for r in results), 0)
 
     def test_concurrent_retries_with_same_idempotency_key_debit_once(self):
         acct, card = self.make_account("100")

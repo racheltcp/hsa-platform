@@ -66,6 +66,13 @@ business answer was "no". It returns `201` with `status: "declined"` and a machi
 `decline_reason`. HTTP errors (`404`, `409`, `422`) are reserved for requests that cannot be
 processed at all, such as an unknown card or malformed amount.
 
+**Every transaction carries its decision trace.** The response includes `decision`: the
+five checks in order, each `passed`, `failed` or `skipped`, with a plain-language detail
+("Restaurants (MCC 5812) is not on the medical allow-list"). The trace is not stored. Because
+checks run in a fixed order and stop at the first failure, the stored `decline_reason`
+determines it completely, so `decision_trace()` rebuilds it for any historical row with no
+extra columns. The UI prints it as the slip under the purchase form and in the ledger.
+
 Deposits follow the same pattern: `BEGIN IMMEDIATE`, idempotency check, sum this tax year's
 deposits, reject if over the IRS limit, credit the balance, insert the deposit row, commit.
 
@@ -225,6 +232,29 @@ contribution sum; "has this idempotency key been used?") need the whole check-th
 sequence to be serialized. The conditional UPDATE and CHECK constraint remain as cheap
 defense in depth.
 
+### Seeing it happen: server-side lock timings
+
+Each live purchase response includes a `processing` block, measured on the server:
+when the request arrived, when `BEGIN IMMEDIATE` returned (lock acquired), when the last
+statement finished, and when `COMMIT` returned (lock released). These are diagnostics for
+that response only, not persisted. The UI's race timeline draws them directly: an amber
+segment for time spent queued, then a solid segment for time holding the lock, coloured by
+the outcome. `test_lock_holding_intervals_never_overlap` uses the same numbers as a
+correctness check: across 25 simultaneous purchases, no two lock-holding intervals overlap,
+and sorting by lock acquisition reproduces the balance sequence exactly.
+
+Two things the timeline makes visible, both worth knowing:
+
+- **Idle gaps between bars.** When the lock frees up, the next waiter doesn't start
+  immediately. SQLite's busy handler sleeps for growing intervals (1, 2, 5, 10, 15, 20,
+  25 ms…) between retries, so a waiter can sleep past the moment the lock was released.
+  Correctness is unaffected, but throughput and tail latency suffer under contention. Row
+  locks in Postgres wake the next waiter as soon as the lock is released.
+- **Waves for large batches.** A browser opens at most six HTTP/1.1 connections per host,
+  so a 30-request race from the UI reaches the server in waves. The server-side
+  guarantee does not depend on arrival pattern; the thread-based tests release 40
+  requests simultaneously.
+
 ### Idempotency
 
 Card networks retry on timeouts. Each purchase carries an `idempotency_key` (the UI sends
@@ -264,7 +294,8 @@ charge (tested).
 ## 6. What I would improve with more time
 
 1. Authorize/capture with holds, reversals and refunds (refunds credit the balance back).
-2. Postgres with per-account row locks, plus a load test showing throughput across many accounts.
+2. Postgres with per-account row locks (removing SQLite's busy-handler polling gaps visible
+   in the race timeline), plus a load test showing throughput across many accounts.
 3. Authentication and authorization; audit log of who did what.
 4. IIAS-style item-level eligibility and a receipt-substantiation flow for edge cases.
 5. Withdrawals/reimbursements to a bank account, and the 20% penalty logic for
