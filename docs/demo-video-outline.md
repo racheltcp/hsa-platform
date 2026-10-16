@@ -1,6 +1,6 @@
 # Demo video outline (target: 4:30, hard limit 5:00)
 
-Record with the app at `http://localhost:5000` on a fresh database (`rm -rf data/` first),
+Record with the app at `http://localhost:8000` on a fresh database (`rm -rf data/` first),
 `architecture.md` open in a second tab, and a terminal ready.
 
 | Time | Section | What to show / say |

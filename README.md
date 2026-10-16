@@ -21,10 +21,10 @@ pip install -r requirements.txt
 python run.py
 ```
 
-Open **http://localhost:5000**. Data is stored in `data/hsa.db` (created on first run).
+Open **http://localhost:8000**. (Not 5000: macOS's AirPlay Receiver already uses that port.) Data is stored in `data/hsa.db` (created on first run).
 To start fresh, stop the server and delete the `data/` folder.
 
-Options: `python run.py --port 8000 --db /path/to/other.db`
+Options: `python run.py --port 9000 --db /path/to/other.db`
 
 Requirements: Python 3.10 or newer (its bundled SQLite must be 3.35+, which every
 official Python 3.10+ build includes; check with `python -c "import sqlite3; print(sqlite3.sqlite_version)"`).
@@ -90,13 +90,13 @@ outcome, not an error), `200` idempotent replay, `404` unknown account/card, `40
 Example with curl:
 
 ```bash
-ACCT=$(curl -s localhost:5000/api/accounts -H 'Content-Type: application/json' \
+ACCT=$(curl -s localhost:8000/api/accounts -H 'Content-Type: application/json' \
   -d '{"holder_name":"Ada Lovelace","email":"ada@example.com","date_of_birth":"1985-12-10","coverage_type":"self_only"}' \
   | python -c 'import sys,json; print(json.load(sys.stdin)["id"])')
-curl -s localhost:5000/api/accounts/$ACCT/deposits -H 'Content-Type: application/json' -d '{"amount":"100"}'
-CARD=$(curl -s -X POST localhost:5000/api/accounts/$ACCT/cards -H 'Content-Type: application/json' -d '{}' \
+curl -s localhost:8000/api/accounts/$ACCT/deposits -H 'Content-Type: application/json' -d '{"amount":"100"}'
+CARD=$(curl -s -X POST localhost:8000/api/accounts/$ACCT/cards -H 'Content-Type: application/json' -d '{}' \
   | python -c 'import sys,json; print(json.load(sys.stdin)["id"])')
-curl -s localhost:5000/api/transactions -H 'Content-Type: application/json' \
+curl -s localhost:8000/api/transactions -H 'Content-Type: application/json' \
   -d "{\"card_id\":\"$CARD\",\"amount\":\"80\",\"merchant_name\":\"Corner Pharmacy\",\"mcc\":\"5912\"}"
 ```
 
