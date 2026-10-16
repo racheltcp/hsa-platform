@@ -42,17 +42,18 @@
       <div class="tl-legend" aria-hidden="true">
         <span><i class="sw wait"></i>Waiting for the lock</span>
         <span><i class="sw hold"></i>Holding it</span>
+        <span><span class="sw-out"><i class="ok"></i><i class="no"></i></span>Decision</span>
       </div>
       <div class="tl-grid timeline play" aria-hidden="true">
         <div class="tl-row" style="--d:.2s">
           <div class="tl-name"><b>$80.00</b><span>1st</span></div>
-          <div class="tl-track"><span class="seg wait" style="left:0;width:3%;--d:.2s"></span><span class="seg hold ok" style="left:3%;width:38%;--d:.35s"></span></div>
+          <div class="tl-track"><div class="tl-lane"><span class="seg wait" style="left:0;width:3%;--d:.2s"></span><span class="seg hold" style="left:3%;width:38%;--d:.35s"></span><span class="outcome ok" style="left:41%;--d:.5s">✓</span></div></div>
           <div class="tl-out"><b class="ok">Approved</b><span>$20.00 left</span></div>
         </div>
         <div class="tl-row" style="--d:.6s">
           <div class="tl-name"><b>$50.00</b><span>2nd</span></div>
-          <div class="tl-track"><span class="seg wait" style="left:1%;width:47%;--d:.6s"></span><span class="seg hold no" style="left:48%;width:36%;--d:.75s"></span></div>
-          <div class="tl-out"><b class="no">Declined</b><span>Not enough money</span></div>
+          <div class="tl-track"><div class="tl-lane"><span class="seg wait" style="left:1%;width:47%;--d:.6s"></span><span class="seg hold" style="left:48%;width:36%;--d:.75s"></span><span class="outcome no" style="left:84%;--d:.9s">✕</span></div></div>
+          <div class="tl-out"><b class="no">Declined</b><span>Saw only $20.00</span></div>
         </div>
       </div>
       <figcaption>An example result. Both purchases arrive together. The $50 one waits while the $80 one holds the lock, then sees only $20 left.</figcaption>
@@ -61,35 +62,30 @@
 
   <!-- Account workspace -->
   <main id="workspace" class="workspace" hidden>
-    <section class="account-bar" aria-labelledby="acct-name">
-      <div class="who">
-        <h1 id="acct-name"></h1>
-        <p id="acct-meta" class="meta"></p>
-      </div>
-      <div class="balance">
-        <span class="label">Available balance</span>
-        <output id="acct-balance" class="balance-figure"></output>
-      </div>
-      <div class="limit">
-        <span class="label" id="limit-label"></span>
-        <div class="meter" role="meter" id="limit-meter" aria-valuemin="0"><span id="limit-bar"></span></div>
-        <span class="meta" id="limit-text"></span>
-      </div>
-    </section>
 
-    <div class="desk">
-      <!-- Left: card and money in -->
-      <section class="column" aria-labelledby="h-card">
-        <h2 id="h-card">Card</h2>
-        <div class="surface">
-          <div id="card-visual" class="card-visual"></div>
-          <p id="card-once" class="callout" hidden></p>
-          <div class="btn-row" id="card-actions"></div>
+    <!-- Overview: who, how much, how much more they can add, and the card that spends it -->
+    <section class="overview" aria-labelledby="acct-name">
+      <div class="overview-money">
+        <div class="holder">
+          <h1 id="acct-name"></h1>
+          <p id="acct-meta" class="meta"></p>
         </div>
 
-        <h2 id="h-deposit">Add money</h2>
-        <form id="form-deposit" class="surface stack" aria-labelledby="h-deposit">
-          <label class="field">Amount
+        <div class="balance">
+          <span class="label">Available balance</span>
+          <output id="acct-balance" class="balance-figure"></output>
+        </div>
+
+        <div class="limit">
+          <div class="limit-row">
+            <span class="label" id="limit-label"></span>
+            <span class="meta" id="limit-text"></span>
+          </div>
+          <div class="meter" role="meter" id="limit-meter" aria-valuemin="0" aria-label="Contributions toward the IRS limit"><span id="limit-bar"></span></div>
+        </div>
+
+        <form id="form-deposit" class="deposit-form" aria-label="Add money">
+          <label class="field">Add money
             <span class="money"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="100.00" autocomplete="off"></span>
           </label>
           <div class="quick" id="deposit-quick" aria-label="Quick amounts">
@@ -98,63 +94,72 @@
             <button type="button" class="chip" data-amount="500">$500</button>
           </div>
           <button class="btn primary" type="submit">Deposit</button>
-          <p class="meta" id="deposit-hint">Deposits count toward this year's IRS contribution limit.</p>
+          <p class="meta deposit-hint" id="deposit-hint"></p>
         </form>
-      </section>
+      </div>
 
-      <!-- Right: authorize a purchase -->
-      <section class="column wide" aria-labelledby="h-purchase">
-        <h2 id="h-purchase">Swipe the card</h2>
-        <div class="surface">
+      <div class="overview-card">
+        <div id="card-visual" class="card-visual"></div>
+        <div id="card-once" class="reveal" hidden></div>
+        <div class="card-controls" id="card-actions"></div>
+      </div>
+    </section>
+
+    <!-- Purchase: choose where, how much, and see the decision -->
+    <section class="pay" aria-labelledby="h-purchase">
+      <div class="section-head">
+        <h2 id="h-purchase">Pay with the card</h2>
+        <p class="meta">Pick a merchant. Eligibility comes from the merchant's category code, the way card networks report it.</p>
+      </div>
+      <div class="pay-grid">
+        <div class="pay-form panel">
           <div class="gate" hidden>
-            <p>There's no card to swipe yet. Issue one and this unlocks.</p>
-            <button class="btn primary" data-action="issue" type="button">Issue virtual card</button>
+            <p>Issue a card above to start paying.</p>
           </div>
           <form id="form-purchase">
             <fieldset>
-            <legend class="visually-hidden">Purchase details</legend>
-            <div class="merchants" id="merchant-presets" role="group" aria-label="Example merchants"></div>
-            <div class="purchase-form">
-            <label class="field">Merchant<input name="merchant_name" required maxlength="100" autocomplete="off"></label>
-            <label class="field">Category<select name="mcc" id="mcc-select"></select></label>
-            <label class="field">Amount
-              <span class="money"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="25.00" autocomplete="off"></span>
-            </label>
-            <button class="btn primary" type="submit">Swipe card</button>
-            </div>
+              <legend class="visually-hidden">Purchase details</legend>
+              <div class="merchants" id="merchant-presets" role="radiogroup" aria-label="Merchant"></div>
+              <div class="custom-merchant" id="custom-merchant" hidden>
+                <label class="field">Merchant name<input name="merchant_name" required maxlength="100" autocomplete="off"></label>
+                <label class="field">Category<select name="mcc" id="mcc-select"></select></label>
+              </div>
+              <div class="pay-row">
+                <label class="field">Amount
+                  <span class="money big"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="25.00" autocomplete="off"></span>
+                </label>
+                <button class="btn primary pay-btn" type="submit" id="pay-btn">Pay</button>
+              </div>
             </fieldset>
           </form>
-          <div id="slip-area" class="slip-area">
-            <p class="slip-empty">Swipe the card to see each check the purchase goes through.</p>
-          </div>
         </div>
-      </section>
-    </div>
+        <div id="slip-area" class="receipt-area panel" aria-live="polite"></div>
+      </div>
+    </section>
 
     <!-- Race -->
     <section class="race" aria-labelledby="h-race">
-      <div class="race-head">
+      <div class="section-head">
         <h2 id="h-race">Race purchases against the lock</h2>
-        <p class="meta">Every purchase below is sent at the same instant. The server lets one at a time hold the account's lock, so each sees the balance the previous one left.</p>
+        <p class="meta">Every purchase is sent at the same instant. The server lets one at a time hold the account's lock, so each one sees the balance the previous one left.</p>
       </div>
-      <div class="surface">
+      <div class="panel">
         <div class="gate" hidden>
-          <p>There's no card to swipe yet. Issue one and this unlocks.</p>
-          <button class="btn primary" data-action="issue" type="button">Issue virtual card</button>
+          <p>Issue a card above to run a race.</p>
         </div>
         <form id="form-race">
           <fieldset class="race-form">
-          <legend class="visually-hidden">Race settings</legend>
-          <label class="field">Amounts, separated by commas<input name="amounts" value="80, 50" autocomplete="off"></label>
-          <label class="field">Send each<span class="suffix-input"><input name="repeat" type="number" min="1" max="50" value="1"><span>times</span></span></label>
-          <label class="field">At
-            <select name="mcc">
-              <option value="5912">Corner Pharmacy (qualified)</option>
-              <option value="8062">St. Mercy Hospital (qualified)</option>
-              <option value="5812">Trattoria Roma (not qualified)</option>
-            </select>
-          </label>
-          <button class="btn primary" type="submit">Send all at once</button>
+            <legend class="visually-hidden">Race settings</legend>
+            <label class="field">Amounts, separated by commas<input name="amounts" value="80, 50" autocomplete="off"></label>
+            <label class="field">Send each<span class="suffix-input"><input name="repeat" type="number" min="1" max="50" value="1"><span>times</span></span></label>
+            <label class="field">At
+              <select name="mcc">
+                <option value="5912">Corner Pharmacy (eligible)</option>
+                <option value="8062">St. Mercy Hospital (eligible)</option>
+                <option value="5812">Trattoria Roma (not eligible)</option>
+              </select>
+            </label>
+            <button class="btn primary" type="submit">Send all at once</button>
           </fieldset>
         </form>
         <div id="contention" class="contention" aria-live="polite"></div>
@@ -162,17 +167,13 @@
       </div>
     </section>
 
-    <!-- Ledger -->
-    <section class="ledger" aria-labelledby="h-ledger">
-      <h2 id="h-ledger">Ledger</h2>
-      <div class="surface flush">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th scope="col">Time</th><th scope="col">What happened</th><th scope="col">Result</th><th scope="col" class="num">Amount</th><th scope="col" class="num">Balance after</th></tr></thead>
-            <tbody id="activity-body"></tbody>
-          </table>
-        </div>
+    <!-- Activity -->
+    <section class="activity" aria-labelledby="h-ledger">
+      <div class="section-head">
+        <h2 id="h-ledger">Activity</h2>
+        <p class="meta">Every deposit and every purchase attempt, newest first. Declined purchases are recorded but never charged.</p>
       </div>
+      <ol class="feed panel" id="activity-body"></ol>
     </section>
   </main>
 

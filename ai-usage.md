@@ -52,6 +52,13 @@ amounts can't compete and offers amounts that will.
 covering correctness, concurrency, idempotency, tests and UX, with real fixes rather than
 cosmetic ones. The bugs it found are below.
 
+**5. "The dashboard still looks basic next to the homepage."** I asked for a critical
+design review of the account dashboard, with before-and-after screenshots and no backend
+changes. Claude screenshotted the existing dashboard from a scripted scenario, listed what
+was wrong (an unconnected summary, three "Issue card" buttons, a decline reason buried in
+row 4, timeline bars coloured by outcome rather than by lock state, declined amounts that
+looked charged), redesigned it, and replayed the same scenario for the "after" shots.
+
 *TODO: add a prompt of your own, such as a question you asked to understand part of the design.*
 
 ## Where the AI's output was wrong, and how it was caught
@@ -85,7 +92,18 @@ removed X?" would expose.
 | The "Use $60 and $38 instead" button sometimes ignored clicks | Found by the browser walkthrough | Redraw the hint only when its text changes |
 | Error messages used code names ("date_of_birth must be…") and vanished in a toast | UX review | Plain-language messages shown next to the field |
 
-### 3. Problems found earlier
+### 3. A bug Claude introduced in the dashboard redesign, and caught
+
+The new activity list showed the deposit icon's "+" about 85 px outside its circle. Claude's
+first guess, a broken glyph in the bundled font, was wrong: a test page rendered "+" fine at
+every weight. Measuring the element showed a CSS rule named `.deposit`, written for the
+*deposit form*, also matched the icon (class `item-icon deposit`) and gave it the form's
+grid layout. The form's class was renamed, and the browser test now checks that every icon
+draws inside its circle. Claude confirmed that check fails when the collision is put back.
+The redesigned race timeline had a similar edge case: the decision mark for the last
+purchase overflowed its track on a phone. It now has its own space, also covered by a check.
+
+### 4. Problems found earlier
 
 - **Didn't run on a stock Mac.** Code that needed Python 3.10 crashed at startup on my
   MacBook's Python 3.9.6. Claude had only tested on 3.13. Fixed, and it now reruns
@@ -107,8 +125,9 @@ What Claude ran, in its sandbox, after the last change:
    flakiness. They cover the brief's race 50 times, 40 purchases at once, a lock-timing
    proof, a random mix of 90 operations across 3 accounts, and 30 simultaneous HTTP requests.
 2. `python scripts/mutation_check.py`: the tests fail for every unsafe variant.
-3. `python scripts/e2e_check.py`: 29 browser checks covering every flow, each error message,
-   desktop and phone widths, an XSS attempt, and the server being stopped mid-session.
+3. `python scripts/e2e_check.py`: 39 browser checks covering every flow, each error message,
+   desktop and phone widths, an XSS attempt, layout regressions, and the server being
+   stopped mid-session.
 4. An old database from the previous version: the app refuses it with a clear message.
 
 What I verified myself:

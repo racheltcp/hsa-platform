@@ -60,10 +60,14 @@ try:
         pg.click("#form-account [type=submit]"); pg.wait_for_timeout(600)
         check("dialog: account created and selected", pg.inner_text("#acct-name") == "Rachel")
         # --- gates without a card
-        check("gate: swipe locked without card", pg.is_visible("#h-purchase ~ .surface .gate") and pg.evaluate("document.querySelector('#form-purchase fieldset').disabled"))
-        pg.click("#h-purchase ~ .surface .gate [data-action=issue]"); pg.wait_for_timeout(600)
-        check("gate: issuing from the gate unlocks swiping", not pg.is_visible("#h-purchase ~ .surface .gate") and not pg.evaluate("document.querySelector('#form-purchase fieldset').disabled"))
-        check("card: full number shown once", len(pg.inner_text(".card-number").replace(" ", "")) == 16)
+        check("no card: one issue button, payment locked with a pointer to it",
+              pg.locator("button:has-text('Issue virtual card'):visible").count() == 1 and pg.is_visible(".pay-form .gate")
+              and pg.evaluate("document.querySelector('#form-purchase fieldset').disabled"))
+        pg.click("[data-card=issue]"); pg.wait_for_timeout(600)
+        check("issuing the card unlocks paying", not pg.is_visible(".pay-form .gate") and not pg.evaluate("document.querySelector('#form-purchase fieldset').disabled"))
+        check("card face is masked; full number shown once beside it",
+              "••••" in pg.inner_text(".card-number") and len(pg.inner_text("#card-once .pan").replace(" ", "")) == 16)
+        check("card shows Active", pg.inner_text(".card-status") == "Active")
         # --- deposit errors inline
         pg.fill("#form-deposit [name=amount]", "5000"); pg.click("#form-deposit [type=submit]"); pg.wait_for_timeout(400)
         t = pg.locator("#form-deposit .field-error")
@@ -73,13 +77,16 @@ try:
         # --- swipe
         pg.fill("#form-purchase [name=amount]", "1.234"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(400)
         check("swipe: fraction-of-cent error inline", "cent" in pg.inner_text("#form-purchase"))
-        pg.fill("#form-purchase [name=amount]", "25"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(500)
-        check("swipe: pharmacy approved, 5 checks passed", "Approved" in pg.inner_text(".verdict-stamp") and pg.locator(".slip .checks li.passed").count() == 5)
-        pg.click("[data-preset='4']"); pg.fill("#form-purchase [name=amount]", "12"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(500)
-        statuses = pg.eval_on_selector_all(".slip .checks li", "els => els.map(e => e.className)")
+        pg.fill("#form-purchase [name=amount]", "25"); pg.wait_for_timeout(100); check("pay button shows the amount", pg.inner_text("#pay-btn") == "Pay $25.00"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(500)
+        check("swipe: pharmacy approved, all 5 checks passed", pg.inner_text(".verdict") == "Approved" and pg.locator(".receipt .strip li.passed").count() == 5)
+        pg.click("[data-merchant='4']"); pg.fill("#form-purchase [name=amount]", "12"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(500)
+        statuses = pg.eval_on_selector_all(".receipt .strip li", "els => els.map(e => e.className)")
         check("swipe: restaurant fails check 4, skips 5", statuses == ["passed", "passed", "passed", "failed", "skipped"], statuses)
+        check("swipe: the reason is the headline", "not on the medical allow-list" in pg.inner_text(".reason") and "Nothing was charged" in pg.inner_text(".reason"))
+        pg.click("[data-merchant=other]")
+        check("another merchant: name and category fields appear", pg.is_visible("#custom-merchant") and pg.input_value("#form-purchase [name=merchant_name]") == "")
         # --- race lab helpers
-        pg.click("[data-preset='0']")
+        pg.click("[data-merchant='0']")
         pg.fill("#form-race [name=amounts]", "10, 20"); pg.wait_for_timeout(200)
         check("race lab: warns when balance covers everything", pg.is_visible("#btn-make-race"))
         pg.click("#btn-make-race"); pg.wait_for_timeout(200)
@@ -89,16 +96,26 @@ try:
         pg.fill("#form-race [name=amounts]", "10"); pg.fill("#form-race [name=repeat]", "12"); pg.click("#form-race [type=submit]"); pg.wait_for_timeout(2500)
         check("race lab: 12 rows, 7 approved ($75 / $10)", pg.locator("#race-result .tl-row").count() == 12 and "7 approved" in pg.inner_text(".tl-summary"), pg.inner_text(".tl-summary"))
         check("race lab: never below zero", "never below zero" in pg.inner_text(".tl-summary"))
+        inside = """() => [...document.querySelectorAll('#race-result .tl-track')].every(tr => {
+            const t = tr.getBoundingClientRect(); return [...tr.querySelectorAll('.seg, .outcome')].every(m => {
+            const r = m.getBoundingClientRect(); return r.left >= t.left - 0.5 && r.right <= t.right + 0.5; }); })"""
+        check("race lab: bars and decision marks stay inside their track", pg.evaluate(inside))
         # --- freeze
         pg.click("[data-card=freeze]"); pg.wait_for_timeout(500)
         pg.fill("#form-race [name=amounts]", "1"); pg.wait_for_timeout(100)
         check("frozen: race lab explains the card is frozen", "frozen" in pg.inner_text("#contention"))
         pg.fill("#form-purchase [name=amount]", "1"); pg.click("#form-purchase [type=submit]"); pg.wait_for_timeout(500)
-        check("frozen: swipe declined at check 2", pg.eval_on_selector_all(".slip .checks li", "els => els.map(e => e.className)")[:2] == ["passed", "failed"])
+        check("frozen: card says Frozen", pg.inner_text(".card-status") == "Frozen")
+        check("frozen: swipe declined at check 2", pg.eval_on_selector_all(".receipt .strip li", "els => els.map(e => e.className)")[:2] == ["passed", "failed"])
         pg.click("[data-card=unfreeze]"); pg.wait_for_timeout(400)
         # --- ledger
         pg.locator("[data-trace]").first.click(); pg.wait_for_timeout(400)
-        check("ledger: show checks expands a trace", pg.locator("tr.trace-row .checks li").count() == 5)
+        check("activity: show checks expands a trace", pg.locator(".item-trace .checks li").count() == 5)
+        check("activity: declined amounts are marked not charged", pg.locator(".item-money b.void").count() >= 1 and "Not charged" in pg.inner_text(".feed"))
+        # regression: a .deposit rule meant for the form once displaced the deposit icon's "+"
+        check("activity: icons draw inside their circles", pg.evaluate("""() => [...document.querySelectorAll('.item-icon')].every(el => {
+            const r = document.createRange(); r.selectNodeContents(el); const t = r.getBoundingClientRect(), b = el.getBoundingClientRect();
+            return t.left >= b.left && t.right <= b.right && t.top >= b.top && t.bottom <= b.bottom; })"""))
         # --- xss
         pg.click("#btn-new-account"); pg.fill("#form-account [name=holder_name]", "<img src=x onerror=alert(1)>")
         pg.fill("#form-account [name=email]", "x@example.com"); pg.click("#form-account [type=submit]"); pg.wait_for_timeout(500)
@@ -112,6 +129,8 @@ try:
         check("mobile: no horizontal overflow", not m.evaluate("document.documentElement.scrollWidth > innerWidth"))
         m.click("#btn-scenario"); m.wait_for_timeout(1800)
         check("mobile: race renders without overflow", m.locator("#race-result .tl-row").count() == 2 and not m.evaluate("document.documentElement.scrollWidth > innerWidth"))
+        check("mobile: decision marks stay inside their track", m.evaluate(inside))
+        check("mobile: balance comes before the card", m.evaluate("document.querySelector('#acct-balance').getBoundingClientRect().top < document.querySelector('#card-visual').getBoundingClientRect().top"))
         # --- server goes away
         server.terminate(); server.wait(); pg.wait_for_timeout(300)
         pg.fill("#form-deposit [name=amount]", "5"); pg.click("#form-deposit [type=submit]"); pg.wait_for_timeout(600)

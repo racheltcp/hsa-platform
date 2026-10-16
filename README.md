@@ -44,17 +44,19 @@ On macOS use `python3`/`pip3` outside the virtual environment; inside it, `pytho
    Try a future date of birth or a duplicate email: the error appears next to the field.
 3. **Deposit funds.** Try depositing more than $4,400 in total on a self-only account to see
    the IRS annual limit enforced.
-4. **Issue a virtual card.** Until you do, the swipe and race panels are locked with a button
-   to issue one. The full number is shown once; only the last 4 digits are stored.
-5. **Swipe the card** using the merchant presets: Pharmacy, Hospital, Dentist and
-   Eyeglasses are approved; Restaurant, Electronics and Grocery are declined. Each swipe
-   prints a slip listing the five checks in order and which one failed.
+4. **Issue a virtual card** from the card area of the account overview. Until you do, paying
+   and racing are locked. The card face always shows the masked number; the full number
+   appears once, beside the card, and only the last 4 digits are stored.
+5. **Pay with the card.** Each merchant tile says whether it's HSA eligible. Pharmacy,
+   Hospital, Dentist and Eyeglasses are approved; Restaurant, Electronics and Grocery are
+   declined. The receipt leads with the reason, then shows the five checks in order and
+   where the payment stopped.
 6. **Freeze the card** and try another purchase (declined: card frozen). Unfreeze to resume.
 7. **Race purchases against the lock:** e.g. amounts `10`, sent `20` times against a $100
    balance; exactly 10 are approved. If the amounts you enter fit inside the balance, the
    page says so and offers amounts that force a real race.
-8. The **Ledger** lists every deposit and every purchase attempt; "Show checks" expands
-   any purchase's decision trace.
+8. **Activity** lists every deposit and every purchase attempt. Declined amounts are struck
+   through and marked "Not charged"; "Show checks" expands any purchase's decision trace.
 
 ## Run the tests
 
@@ -63,7 +65,7 @@ python -m unittest discover -s tests -t . -v      # 48 tests, ~7 seconds
 python scripts/mutation_check.py                  # proves the race tests can catch races
 ```
 
-Optional, a 29-step walkthrough in a headless browser (needs Playwright, which the app
+Optional, a 39-step walkthrough in a headless browser (needs Playwright, which the app
 itself doesn't):
 
 ```bash
