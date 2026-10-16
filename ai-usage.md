@@ -1,134 +1,117 @@
 # AI usage
 
-> **TODO before submitting:** this file was drafted from the actual build session. Sections
-> marked *TODO* need your own words: what you personally reviewed, changed, and re-ran.
-> Delete this note when done.
+> **TODO before submitting:** drafted by Claude from the actual build conversation, with
+> each action credited to whoever really did it. The *TODO* items need your own words:
+> what you personally read, questioned, changed and re-ran. Delete this note when done.
 
 ## Tools used
 
 | Tool | Used for |
 | --- | --- |
-| **Claude (Opus 5.5, claude.ai with code execution)** | Design, implementation, tests, docs, and running verification (test suite, mutation check, headless-browser walkthrough) in a sandbox |
-| *TODO: anything else you used (IDE assistant, ChatGPT, etc.), or delete this row* | |
+| **Claude (Opus 5.5, in claude.ai with code execution)** | Design, all code, tests and docs, and running the checks (test suite, mutation check, browser walkthrough) in its sandbox |
+| *TODO: anything else you used, or delete this row* | |
 
-## Which parts AI helped with
+## Who did what
 
-AI generated the first version of essentially every file: schema, service layer, Flask routes,
-UI, tests and documentation. My role was to set constraints, interrogate the design, and,
-most importantly, decide what evidence would convince me it was correct, rather than
-accepting "all tests pass" at face value.
+Being plain about this: Claude wrote essentially every file. My part was directing it,
+running the project on my own machine, pushing back when results weren't good enough, and
+deciding what had to be proven before I'd submit it.
 
-| Area | AI contribution | My contribution |
+| | Claude | Me |
 | --- | --- | --- |
-| Data model | Proposed integer cents, stored balance + ledger rows, DB-level CHECKs, partial unique index for one live card | *TODO: what you questioned or changed* |
-| Concurrency | Proposed `BEGIN IMMEDIATE` + conditional `UPDATE` | Required proof the tests can detect a race; that surfaced a wrong claim (below) |
-| Domain rules | MCC allow-list; IRS contribution limits | Verified 2026 limits ($4,400 / $8,750) against current IRS-based reporting rather than model memory |
-| UI | Single-page vanilla JS | Reviewed screenshots; found a stale-state bug |
-| Docs | Drafted README / architecture / this file | *TODO: your edits* |
+| Build | Chose the stack, wrote the backend, UI, tests and docs | Gave it the assignment and asked it to build the project |
+| Running locally | Tested on Python 3.13 in its sandbox | Ran it on my MacBook, hit a crash at startup, and reported it (below) |
+| Concurrency proof | Added a naive-code control test and the mutation check on its own initiative | *TODO: whether you've run `python scripts/mutation_check.py` yourself* |
+| UI | Built two versions; ran browser walkthroughs and reviewed its own screenshots | Said the first version looked generic; sent screenshots from my machine |
+| Review | Did a critical review on request; found and fixed the bugs listed below | Asked for a critical, ranked review and said not to settle for "looks good" |
+| Domain facts | Looked up the 2026 IRS limits with a web search | *TODO: if you checked anything yourself* |
 
 ## Representative prompts and workflows
 
-**1. Build from the brief.** I attached the assignment PDF and asked Claude to build the
-project. It planned the stack, discovered the sandbox could not reach PyPI (so FastAPI was
-unavailable), and switched to Flask + stdlib `sqlite3` + `unittest`, which turned out
-better for the reviewer: one dependency, no build step.
+**1. Build it from the brief.** I attached the assignment PDF and asked Claude to do the
+project. Its sandbox couldn't reach PyPI, so it switched from FastAPI to Flask, which was
+already installed, plus the standard library's `sqlite3` and `unittest`. That turned out
+well for reviewers: one dependency and no build step.
 
-**2. "The tests all passed on the first run. Prove they can fail."** A concurrency test
-that passes against correct code proves nothing if it would *also* pass against broken
-code (for example, if the threads never actually overlap). So the workflow was:
-- add a **control test** that runs a deliberately naive read-check-write purchase under
-  the same thread/barrier harness and asserts that it *does* double-spend;
-- write `scripts/mutation_check.py`, which copies the project, removes each concurrency
-  safeguard in turn, and confirms the race tests fail for every unsafe variant.
+**2. Prove the tests can fail.** All the tests passed on the first run, and Claude treated
+that as suspicious rather than reassuring. A concurrency test proves nothing if it would
+also pass against broken code, for example if the threads never overlap. So it added:
+- a control test that runs a deliberately naive purchase under the same harness and checks
+  that it *does* double-spend;
+- `scripts/mutation_check.py`, which removes each safety mechanism in a copy of the code
+  and confirms the concurrency tests fail.
 
-**3. Click through the UI like a reviewer.** Claude drove the running app in a headless
-Chromium (Playwright): created an account, deposited, issued a card, made qualified and
-non-qualified purchases, froze the card, exceeded the contribution limit, ran the race
-scenario, tried an XSS payload as an account name, and checked a 390px mobile viewport.
-I reviewed the screenshots and the printed results.
+**3. "It looks generic. Will it impress anyone?"** I pushed back on the first UI. Claude
+agreed it was a template-style dashboard and rebuilt it around what the system actually
+does: lock timings measured on the server, drawn as a timeline, and a printed decision trace
+for every purchase. One fix came from a screenshot I sent. I'd raced $80 and $50 against
+$198.57, both were approved, and the "race" showed nothing. The panel now warns when the
+amounts can't compete and offers amounts that will.
 
-**4. "Is this UI the best you can do? It looks generic."** I pushed back on the first UI.
-Claude agreed it was a templated dashboard and proposed changing what the UI *shows*, not
-just how it looks: server-measured lock timings drawn as a per-request timeline, a printed
-decision trace for every purchase, and a race panel that warns when the chosen amounts
-can't produce contention. That last one came from my own screenshot: I ran 80 + 50 against
-a $198.57 balance, both were approved, and the "race" demonstrated nothing. The timeline
-then exposed something none of us had noticed: visible idle gaps between lock holders,
-caused by SQLite's busy-handler backoff, now documented in `architecture.md`.
+**4. "Be critical. Find what I missed."** I asked for a ranked review of the whole project
+covering correctness, concurrency, idempotency, tests and UX, with real fixes rather than
+cosmetic ones. The bugs it found are below.
 
-*TODO: add a prompt of your own, e.g. a follow-up question you asked to understand a piece of the design.*
+*TODO: add a prompt of your own, such as a question you asked to understand part of the design.*
 
-## Where AI output was wrong, and how it was corrected
+## Where the AI's output was wrong, and how it was caught
 
-### The main one: an overconfident claim about what makes the system safe
+### 1. A wrong explanation of why the system was safe
 
-The first version of `process_transaction` had this docstring:
+The first version of the purchase code said the conditional `UPDATE` keeps the balance safe
+"even if the surrounding transaction were weakened later". In other words, the lock was
+optional. The mutation check disproved it. With the lock removed:
+- purchases were still safe, but
+- 20 simultaneous $300 deposits were all accepted, $6,000 against a $4,400 limit;
+- simultaneous retries with the same key crashed instead of returning the original result.
 
-> The balance debit is additionally a single conditional UPDATE ... so the "check funds"
-> and "take funds" steps ... cannot be interleaved even if the surrounding transaction
-> were weakened later.
+The lock is the essential guarantee; the conditional `UPDATE` is a backstop. The code was
+right but its explanation was wrong, which is exactly what an interviewer's "what if you
+removed X?" would expose.
 
-That implies the system stays safe if the transaction lock is ever weakened, as long as
-the atomic UPDATE remains. The mutation check showed that was **wrong**. With the lock
-removed and the conditional UPDATE kept:
+### 2. Bugs found in the critical review (all now fixed, each with a regression test)
 
-- purchases were indeed still safe, **but**
-- 20 concurrent $300 deposits were **all accepted**: $6,000 against a $4,400 annual limit,
-  because "sum this year's deposits, then insert" spans multiple rows and needs the lock;
-- concurrent retries with the same idempotency key crashed with a `UNIQUE` constraint
-  error (HTTP 500) instead of returning the original result.
+| Problem | How it showed up | Fix |
+| --- | --- | --- |
+| The check order was written in two places: once for the decision, once for the explanation | Code reading. Nothing kept them in sync | One ordered `CHECKS` list that both read; a test makes each check fail alone |
+| An amount of `1e999999999` crashed the server with an HTML 500 | Probing the API | Bounds checked before any arithmetic. The first fix then let `1e-999999999` through as 0 cents, caught by the edge-value probe and fixed |
+| Retrying a purchase with a different merchant name returned the old result | Probing the API | Retries must match amount, category *and* merchant |
+| Retry keys were global, so account B got a 409 for a key account A had used | Probing the API | Keys scoped per card and per account in the schema |
+| Any crash, or a busy database, returned an HTML page the UI couldn't read | Probing the API | Every error is JSON with a readable message; busy is a 503 |
+| Malformed JSON was reported as "holder_name is required" | Probing the API | Its own 400 error |
+| An account "closed" state that nothing could ever reach | Code reading | Removed, with its dead decline branch |
+| The "threads really overlapped" test only asserted a wait of more than 0 ms | Code reading | Now asserts most requests queued behind another lock holder |
+| Timings used the wall clock, which can jump | Code reading | Monotonic `perf_counter` |
+| The "Use $60 and $38 instead" button sometimes ignored clicks | Found by the browser walkthrough | Redraw the hint only when its text changes |
+| Error messages used code names ("date_of_birth must be…") and vanished in a toast | UX review | Plain-language messages shown next to the field |
 
-So the lock is the load-bearing guarantee, and the conditional UPDATE is defense in
-depth, not a substitute for it. I corrected the docstring and wrote up the
-measured results as a table in `architecture.md`. This is the most useful lesson of the
-project for me: the code was correct, but the *explanation* of why it was correct was not,
-and that would have been exposed the moment an interviewer asked "what if you removed X?"
+### 3. Problems found earlier
 
-### Smaller corrections
+- **Didn't run on a stock Mac.** Code that needed Python 3.10 crashed at startup on my
+  MacBook's Python 3.9.6. Claude had only tested on 3.13. Fixed, and it now reruns
+  everything on a real 3.9 interpreter. The default port also moved from 5000 to 8000,
+  because macOS's AirPlay Receiver uses 5000.
+- **Floats in money formatting.** Display used `cents / 100`; replaced with integer-only formatting.
+- **Stale screen state** after switching accounts, found in Claude's own screenshots.
+- **An unverifiable citation.** An early draft cited IRS document numbers from memory; it
+  was replaced with a plain description, and the dollar figures were checked by web search.
+- **Fonts from Google** were blocked in the sandbox and wouldn't load offline; the font is now bundled.
 
-- **Floats in money formatting.** Storage and arithmetic were integer cents, but the
-  first display helper did `f"{cents / 100:.2f}"`. Replaced with integer-only `divmod`
-  formatting and a test, so no float touches a money value anywhere.
-- **Stale UI state.** Reviewing a screenshot showed the "Run the race" button switched to
-  a new account but still displayed the previous account's last purchase result and
-  "repeat 20" setting. Fixed by resetting per-account UI state in one `selectAccount()`
-  function.
-- **Didn't run on a stock Mac.** The code used `str | None` type hints, which need Python
-  3.10+, and was only tested on 3.13. The first run on my MacBook, which ships Python 3.9.6,
-  crashed at import. Fixed with `from __future__ import annotations`. The full test suite
-  and mutation check were then re-run on an actual Python 3.9 interpreter, and `run.py`
-  now checks the Python and SQLite versions up front with a clear message. The same session
-  switched the default port from 5000 to 8000, because macOS's AirPlay Receiver occupies 5000.
-- **Unformatted error message.** The limit error read "$4400.00"; changed to "$4,400.00".
-- **Font loading.** The redesign first loaded Public Sans from Google Fonts. That host was
-  blocked in Claude's sandbox, which also meant the app would silently fall back to system
-  fonts for any reviewer offline. The font (SIL Open Font License) is now bundled in
-  `app/static/fonts/` with its license.
-- **Unverifiable citation.** An early draft of `limits.py` cited specific IRS Revenue
-  Procedure numbers from memory. Since I could not verify those numbers, the citation
-  was replaced with a plain description; the dollar figures themselves were checked
-  against a web search.
+*TODO: anything you found yourself belongs here, and it's worth more than everything above.*
 
-*TODO: if you found anything yourself while reviewing, it belongs here and is worth more than the items above.*
+## How the final implementation was verified
 
-## How I verified the final implementation
+What Claude ran, in its sandbox, after the last change:
+1. `python -m unittest discover -s tests -t .`: 48 tests passing, on Python 3.13 and on 3.9.
+   The concurrency tests were repeated 10 times on 3.13 and 5 times on 3.9 to check for
+   flakiness. They cover the brief's race 50 times, 40 purchases at once, a lock-timing
+   proof, a random mix of 90 operations across 3 accounts, and 30 simultaneous HTTP requests.
+2. `python scripts/mutation_check.py`: the tests fail for every unsafe variant.
+3. `python scripts/e2e_check.py`: 29 browser checks covering every flow, each error message,
+   desktop and phone widths, an XSS attempt, and the server being stopped mid-session.
+4. An old database from the previous version: the app refuses it with a clear message.
 
-1. **Automated tests:** `python -m unittest discover -s tests -t .` runs 42 tests:
-   business rules, API contract, and concurrency (threads released together by a barrier,
-   50 rounds of the $100 / $80 + $50 scenario, 40 x $10 against $100, concurrent deposits
-   against the limit, concurrent idempotent retries, and 30 simultaneous HTTP requests
-   against a real threaded server). Every concurrency test also checks the ledger
-   invariant `balance == deposits - approved purchases`, and one asserts directly from
-   server timings that no two purchases ever hold the lock at the same time.
-2. **Tests of the tests:** the naive-implementation control test, plus
-   `python scripts/mutation_check.py` showing the suite fails when any safeguard that
-   matters is removed.
-3. **Database-level invariants:** a test confirms a direct `UPDATE ... SET balance_cents = -1`
-   is rejected by the schema, independent of application code.
-4. **End-to-end UI walkthrough** in a headless browser, including an XSS probe (account
-   name `<img src=x onerror=alert(1)>` renders as text) and a mobile-width check.
-5. **Domain facts** (2026 HSA limits) checked against current sources instead of trusting
-   model memory.
-6. *TODO: what you ran and read yourself — e.g. "I read every line of services.py and db.py,
-   re-ran the test suite and mutation check on my machine (OS / Python version), and walked
-   through the reviewer tour in the README."*
+What I verified myself:
+- I ran the app on my MacBook (Python 3.9.6) and used it through the browser.
+- *TODO: list what you actually did, e.g. "Read purchases.py and db.py line by line; ran the
+  test suite, mutation check and e2e check on my Mac; worked through the review questions."*

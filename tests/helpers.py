@@ -1,67 +1,88 @@
 from __future__ import annotations
 
+import itertools
 import shutil
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
-from app import services
+from app import accounts, cards, common, purchases
 from app.db import connect, init_db
+
+_emails = itertools.count(1)
 
 
 class DbTestCase(unittest.TestCase):
-    """Each test gets a fresh on-disk SQLite database (on disk, not :memory:,
-    so multiple threads/connections can share it exactly like the real app)."""
+    """A fresh SQLite file per test. On disk rather than in memory, so several
+    threads with their own connections share it exactly like the real server."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="hsa-test-")
         self.db_path = str(Path(self._tmp) / "test.db")
         init_db(self.db_path)
         self.conn = connect(self.db_path)
-        self._original_clock = services.clock
+        self._real_clock = common.clock
 
     def tearDown(self):
-        services.clock = self._original_clock
+        common.clock = self._real_clock
         self.conn.close()
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    # --- fixtures -----------------------------------------------------------------
-    _seq = 0
+    def set_today(self, year, month, day):
+        common.clock = lambda: datetime(year, month, day, 12, tzinfo=timezone.utc)
 
-    def make_account(self, balance: str | None = None, coverage="self_only",
-                     dob="1990-05-01", with_card=True):
-        DbTestCase._seq += 1
-        acct = services.create_account(self.conn, {
-            "holder_name": "Test Holder",
-            "email": f"holder{DbTestCase._seq}@example.com",
-            "date_of_birth": dob,
-            "coverage_type": coverage,
-        })
+    def make_account(self, balance: str | None = None, coverage="self_only", dob="1990-05-01",
+                     with_card=True):
+        acct = accounts.create_account(self.conn, {
+            "holder_name": "Test Holder", "email": f"holder{next(_emails)}@example.com",
+            "date_of_birth": dob, "coverage_type": coverage})
         if balance:
-            services.deposit(self.conn, acct["id"], {"amount": balance})
-        card = services.issue_card(self.conn, acct["id"]) if with_card else None
+            accounts.deposit(self.conn, acct["id"], {"amount": balance})
+        card = cards.issue_card(self.conn, acct["id"]) if with_card else None
         return acct, card
 
-    def purchase(self, card, amount, mcc="5912", key=None, conn=None):
-        txn, _ = services.process_transaction(conn or self.conn, {
-            "card_id": card["id"], "amount": amount, "merchant_name": "Test Merchant",
-            "mcc": mcc, "idempotency_key": key,
-        })
+    def buy(self, card, amount, mcc="5912", key=None, merchant="Test Merchant", conn=None):
+        txn, _ = purchases.authorize_purchase(conn or self.conn, {
+            "card_id": card["id"], "amount": amount, "merchant_name": merchant,
+            "mcc": mcc, "idempotency_key": key})
         return txn
 
-    def balance_cents(self, account_id):
-        return self.conn.execute(
-            "SELECT balance_cents FROM accounts WHERE id = ?", (account_id,)).fetchone()[0]
+    def buy_on_own_connection(self, card_id, amount, mcc="5912", key=None):
+        """What one HTTP request does: its own connection, then a purchase."""
+        conn = connect(self.db_path)
+        try:
+            return self.buy({"id": card_id}, amount, mcc, key, conn=conn)
+        finally:
+            conn.close()
+
+    def balance(self, account_id) -> int:
+        return self.conn.execute("SELECT balance_cents FROM accounts WHERE id = ?",
+                                 (account_id,)).fetchone()[0]
 
     def assert_ledger_consistent(self, account_id):
-        """balance == sum(deposits) - sum(approved purchases), and never negative."""
-        deposits = self.conn.execute(
-            "SELECT COALESCE(SUM(amount_cents),0) FROM deposits WHERE account_id=?",
+        """balance == all deposits - approved purchases, and never negative."""
+        deposited = self.conn.execute(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM deposits WHERE account_id = ?",
             (account_id,)).fetchone()[0]
         spent = self.conn.execute(
-            "SELECT COALESCE(SUM(amount_cents),0) FROM transactions "
-            "WHERE account_id=? AND status='approved'", (account_id,)).fetchone()[0]
-        balance = self.balance_cents(account_id)
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM transactions "
+            "WHERE account_id = ? AND status = 'approved'", (account_id,)).fetchone()[0]
+        balance = self.balance(account_id)
         self.assertGreaterEqual(balance, 0)
-        self.assertEqual(balance, deposits - spent,
-                         f"ledger drift: balance={balance} deposits={deposits} spent={spent}")
+        self.assertEqual(balance, deposited - spent,
+                         f"ledger drift: balance={balance} deposited={deposited} spent={spent}")
+
+
+def run_concurrently(fn, args_list):
+    """Run fn(*args) on one thread per item, all released at the same instant."""
+    barrier = threading.Barrier(len(args_list))
+
+    def worker(args):
+        barrier.wait()
+        return fn(*args)
+
+    with ThreadPoolExecutor(max_workers=len(args_list)) as pool:
+        return list(pool.map(worker, args_list))

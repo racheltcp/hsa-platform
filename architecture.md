@@ -4,84 +4,116 @@
 
 ```mermaid
 flowchart LR
-    UI["Browser UI<br/>index.html + app.js"] -- "JSON over HTTP" --> API["Flask routes<br/>app/api.py"]
-    API --> SVC["Service layer<br/>app/services.py"]
-    SVC --> RULES["Rules<br/>merchants.py (MCC allow-list)<br/>limits.py (IRS limits)<br/>money.py (cents)"]
-    SVC --> DB[("SQLite<br/>data/hsa.db (WAL)")]
+    UI["Browser UI<br/>index.html + app.js"] -- "JSON over HTTP" --> API["api.py<br/>routes + error handling"]
+    API --> ACC["accounts.py<br/>accounts, deposits, activity"]
+    API --> CARDS["cards.py<br/>issue, replace, freeze"]
+    API --> PUR["purchases.py<br/>authorization"]
+    ACC & CARDS & PUR --> DB[("SQLite, WAL<br/>db.py + schema.sql")]
+    PUR --> RULES["merchants.py (MCC allow-list)<br/>money.py (cents)"]
+    ACC --> LIM["limits.py (IRS limits)"]
 ```
 
-Three layers, each with one job:
+The modules follow the assignment's four features, so each question has one place to
+look:
 
-| Layer | Responsibility | Knows about HTTP? | Knows about SQL? |
-| --- | --- | --- | --- |
-| `api.py` | Parse JSON, call one service function, map results/errors to status codes | yes | no |
-| `services.py` | All business rules and every transaction boundary | no | yes |
-| `schema.sql` | Shape of the data plus invariants the database itself enforces | no | yes |
+| File | Job | Lines |
+| --- | --- | --- |
+| `api.py` | Turn HTTP into function calls, and every failure into JSON | ~120 |
+| `accounts.py` | Create accounts, deposits within the IRS limit, the activity feed | ~160 |
+| `cards.py` | Issue, replace and freeze cards; card numbers | ~85 |
+| `purchases.py` | **Authorize a purchase.** The part that has to be right | ~190 |
+| `db.py` | Connections, schema version, `write_transaction` (the lock) | ~70 |
+| `schema.sql` | Tables plus the rules the database enforces itself | ~60 |
 
-The service layer takes a plain `sqlite3.Connection`, not a Flask request. That is why the
-concurrency tests can drive it directly from 40 threads, and why swapping Flask for another
-framework would touch only `api.py`.
+The business modules take a plain `sqlite3.Connection`, never a Flask request. That's why
+the concurrency tests can call them from 90 threads at once, and why replacing Flask would
+only touch `api.py`.
 
-The server runs threaded (`app.run(threaded=True)`): each HTTP request gets its own OS
-thread and its own SQLite connection, so concurrent purchases genuinely race, just as they
-would behind a production WSGI server.
+The server runs threaded (`app.run(threaded=True)`), so each request gets its own thread
+and its own connection, and simultaneous purchases genuinely race.
 
 ## 2. Request flow: authorizing a purchase
 
 ```mermaid
 sequenceDiagram
-    participant C as Client (card network / UI)
+    participant C as Client (card network or UI)
     participant A as api.py
-    participant S as services.process_transaction
+    participant P as purchases.authorize_purchase
     participant D as SQLite
     C->>A: POST /api/transactions {card_id, amount, merchant_name, mcc, idempotency_key}
-    A->>S: process_transaction(conn, body)
-    S->>S: validate input, parse amount to integer cents
-    S->>D: BEGIN IMMEDIATE (take the write lock; other writers wait)
-    S->>D: SELECT by idempotency_key
-    alt key seen before
-        D-->>S: existing transaction
-        S-->>A: same result, replayed=true (HTTP 200)
-    else new request
-        S->>D: SELECT card, SELECT account
-        S->>S: card frozen/cancelled/expired? account closed? MCC qualified?
-        opt all checks pass
-            S->>D: UPDATE accounts SET balance = balance - amt<br/>WHERE id = ? AND balance >= amt RETURNING balance
-            Note over S,D: 0 rows updated means INSUFFICIENT_FUNDS
+    A->>P: authorize_purchase(conn, body)
+    P->>P: validate input, dollars to integer cents
+    P->>D: BEGIN IMMEDIATE (take the write lock; other writers wait here)
+    P->>D: SELECT by (card_id, idempotency_key)
+    alt seen before
+        P->>P: same amount, merchant and MCC? else 409
+        P-->>A: the stored result, replayed (HTTP 200)
+    else new purchase
+        P->>D: SELECT card, SELECT balance
+        P->>P: run CHECKS 1-4 in order, stop at first failure
+        opt all four passed
+            P->>D: UPDATE accounts SET balance = balance - amt<br/>WHERE id = ? AND balance >= amt RETURNING balance
+            Note over P,D: no row back = check 5 (funds) failed
         end
-        S->>D: INSERT transactions (approved or declined, with reason and balance_after)
-        S->>D: COMMIT (releases lock)
-        S-->>A: transaction (HTTP 201)
+        P->>D: INSERT transaction (approved or declined + reason + balance)
+        P->>D: COMMIT (lock released)
+        P-->>A: transaction + lock timings (HTTP 201)
     end
     A-->>C: JSON
 ```
 
-Check order is deliberate: **card state, then account state, then merchant eligibility,
-then funds.** A $500 restaurant charge on a $5 balance is declined as
-`NOT_QUALIFIED_MEDICAL_EXPENSE`, not `INSUFFICIENT_FUNDS`, because that is the reason that
-would still apply after a deposit.
+### The checks, defined once
 
-**A declined purchase is not an HTTP error.** The request was valid and fully processed; the
-business answer was "no". It returns `201` with `status: "declined"` and a machine-readable
-`decline_reason`. HTTP errors (`404`, `409`, `422`) are reserved for requests that cannot be
-processed at all, such as an unknown card or malformed amount.
+`purchases.CHECKS` is an ordered list of five checks. It is the only place the order is
+written down:
 
-**Every transaction carries its decision trace.** The response includes `decision`: the
-five checks in order, each `passed`, `failed` or `skipped`, with a plain-language detail
-("Restaurants (MCC 5812) is not on the medical allow-list"). The trace is not stored. Because
-checks run in a fixed order and stop at the first failure, the stored `decline_reason`
-determines it completely, so `decision_trace()` rebuilds it for any historical row with no
-extra columns. The UI prints it as the slip under the purchase form and in the ledger.
+1. Card has not been cancelled
+2. Card is not frozen
+3. Card is not expired (valid through the end of its expiry month)
+4. Merchant is a qualified medical expense
+5. Balance covers the amount
 
-Deposits follow the same pattern: `BEGIN IMMEDIATE`, idempotency check, sum this tax year's
-deposits, reject if over the IRS limit, credit the balance, insert the deposit row, commit.
+`authorize_purchase` walks the list and stops at the first failure. `decision_trace`
+reads the same list to explain a stored transaction later: earlier checks passed, the
+failing one failed, later ones never ran. Because the order defines both, the explanation
+can't drift from the decision. An earlier version kept the order in two places, and a
+test now builds one purchase that fails each check and asserts that reason and trace agree.
+
+The order is deliberate. A $500 restaurant charge on a $5 balance is declined as "not a
+medical expense", not "insufficient funds", because that's the reason that would still be
+true after a deposit. Funds is checked last because it's the only check that changes
+anything, and it has to happen atomically with the debit.
+
+### Errors versus declines
+
+**A declined purchase is not an error.** The request was valid and fully processed; the
+answer was no. It returns `201` with `status: "declined"` and a `decline_reason`.
+
+**Errors** are requests that can't be processed. Every one comes back as JSON in the same
+shape, including crashes:
+
+```json
+{"error": {"code": "validation_error", "message": "Date of birth must be in the past.", "field": "date_of_birth"}}
+```
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `invalid_json` | Body isn't a JSON object |
+| 404 | `not_found` | Unknown account or card |
+| 409 | `email_taken`, `card_exists`, `contribution_limit_exceeded`, `idempotency_key_reused`, `invalid_card_state` | Conflicts with existing data |
+| 422 | `validation_error` | Bad input. `field` names the input |
+| 503 | `busy` | Waited 10 s for the lock (pathological load). Safe to retry |
+| 500 | `internal_error` | A bug. Logged, and the transaction was rolled back |
+
+Messages are written for a person, because the UI shows them as-is next to the field named
+in `field`.
 
 ## 3. Data model
 
 ```mermaid
 erDiagram
     accounts ||--o{ deposits : receives
-    accounts ||--o{ cards : "has (at most one live)"
+    accounts ||--o{ cards : "has (one live at a time)"
     accounts ||--o{ transactions : "is charged by"
     cards ||--o{ transactions : "is used for"
 
@@ -89,96 +121,106 @@ erDiagram
         text id PK "acct_..."
         text holder_name
         text email UK
-        text date_of_birth "drives 55+ catch-up"
+        text date_of_birth "decides the 55+ catch-up"
         text coverage_type "self_only or family"
         int balance_cents "CHECK >= 0"
-        text status "active or closed"
     }
     deposits {
         text id PK
         text account_id FK
         int amount_cents "CHECK > 0"
         int tax_year
-        text idempotency_key UK
+        text idempotency_key "UNIQUE per account"
         int balance_after_cents
     }
     cards {
-        text id PK "token used by transactions"
+        text id PK "token used by purchases"
         text account_id FK
-        text last4 "full PAN never stored"
+        text last4 "full number never stored"
         int exp_month
         int exp_year
         text status "active, frozen, cancelled"
     }
     transactions {
         text id PK
-        text idempotency_key UK
+        text idempotency_key "UNIQUE per card"
         text account_id FK
         text card_id FK
         text merchant_name
         text mcc "ISO 18245"
         int amount_cents "CHECK > 0"
         text status "approved or declined"
-        text decline_reason "NULL iff approved"
+        text decline_reason "NULL exactly when approved"
         int balance_after_cents
     }
 ```
 
 ### Modelling decisions
 
-**Account information.** Name and email identify the holder (email is unique). Date of
-birth and HDHP coverage type are included because they determine the IRS annual
-contribution limit: $4,400 self-only or $8,750 family in 2026, plus a $1,000 catch-up for
-holders who are 55 or older during the tax year. I deliberately did not collect SSN,
-address, or employer: they matter for KYC and payroll in a real product but add nothing to
-the flows being evaluated, and sensitive fields should not exist in a demo database.
+**What an account holds.** Name and email identify the holder. Date of birth and health-plan
+coverage are there because they set the IRS annual limit: $4,400 self-only or $8,750 family
+in 2026, plus $1,000 for anyone 55 or older by the end of the year. I left out SSN, address
+and employer. A real product needs them for identity checks and payroll, but they add nothing
+to these flows, and sensitive fields shouldn't exist in a demo database.
 
-**Money is integer cents everywhere.** Inputs are parsed `str -> Decimal -> int`, and
-inputs with sub-cent precision are rejected rather than rounded. Formatting back to dollars
-is integer-only too (`divmod`), so no float ever touches a balance.
+**Money is integer cents.** `money.parse_amount` is the only place dollars are parsed:
+`str -> Decimal -> int`. It rejects fractions of a cent rather than rounding, and it checks
+bounds before doing any arithmetic, because rounding a value like `1e999999999` overflows
+inside the decimal module. Formatting back to dollars is integer-only too.
 
-**`balance_cents` is a stored running balance, backed by a ledger.** Deposits and approved
-transactions together form a complete ledger, so the balance could be computed as
-`SUM(deposits) - SUM(approved transactions)`. Storing it as well gives the concurrency
-control a single row to lock and conditionally update, and makes reads O(1). Every test
-asserts the invariant `balance == deposits - approved spend` so the two cannot drift silently.
+**A stored balance, backed by a ledger.** Deposits plus approved purchases are a complete
+ledger, so the balance could be computed with `SUM`. It's stored as well, to give concurrency
+control one row to lock and conditionally update. Every test checks
+`balance == deposits - approved purchases`, so the two can't silently drift.
 
-**Declined attempts are recorded.** Every authorization attempt is a row, with its reason
-and the balance at decision time. This is the audit trail a support agent or regulator
-would ask for ("why was my pharmacy charge declined at 2:14pm?").
+**Every attempt is recorded**, declines included, with the reason and the balance the
+decision saw. That's the audit trail support would need: "why was my pharmacy charge
+declined at 2:14 pm?"
 
-**Database-enforced invariants**, not just application checks:
+**Idempotency keys are scoped**: per card for purchases, per account for deposits. A key
+means "this is a retry of something *I* sent", so it shouldn't collide with another
+customer's key. An earlier version made keys globally unique, so account B got a 409 for a
+key account A had used, which also revealed that the key existed. A retry must also repeat the
+same purchase: same amount, MCC *and* merchant name. The first version ignored the merchant
+and would return a different purchase's result.
+
+**Invariants the database enforces itself**, whatever the application does:
 - `CHECK (balance_cents >= 0)` on accounts
 - `CHECK (amount_cents > 0)` on deposits and transactions
-- `CHECK ((status = 'approved') = (decline_reason IS NULL))` on transactions
-- A **partial unique index** `ON cards(account_id) WHERE status IN ('active','frozen')`: at
-  most one live card per account, even if two "issue card" requests race
-- `UNIQUE (idempotency_key)` on deposits and transactions
+- `CHECK ((status = 'approved') = (decline_reason IS NULL))`
+- `UNIQUE (email)`. The constraint, not a prior lookup, stops two simultaneous sign-ups
+- A partial unique index allowing one live (active or frozen) card per account
+- `UNIQUE (card_id, idempotency_key)` and `UNIQUE (account_id, idempotency_key)`
 
-**Cards.** The 16-digit, Luhn-valid number is generated at issuance and returned **once**;
-only `last4` is persisted. Transactions reference the card by its opaque `card_id`, which
-plays the role of a network token. In production the PAN would live in a PCI-scoped vault
-and the authorization request would arrive from the card processor with a token. Cards
-expire 3 years after issuance and are valid through the end of the expiry month. Replacing
-a card cancels the old one in the same transaction.
+**No account "closed" state.** An earlier version had one, plus a decline reason for it, but
+nothing could close an account, so that code never ran. Freezing the card covers "stop
+spending" for this scope. Closing an account properly (pay out the balance, cancel the card)
+is listed under improvements.
 
-**Qualified-expense rule: MCC allow-list.** Card networks tag every authorization with a
-merchant category code. Pharmacies (5912), hospitals (8062), doctors, dentists, vision,
-labs, ambulance and medical equipment are on the allow-list; everything else, including
-unknown codes, is declined. Failing closed is the right default for a tax-advantaged
-account: a wrongly approved purchase becomes taxable income plus a 20% penalty for the
-holder, whereas a wrongly declined one is a recoverable inconvenience.
+**Cards.** The 16-digit Luhn-valid number is generated at issuance and returned once; only
+`last4` is stored. Purchases refer to the card by `card_id`, which plays the role of a
+network token. In production the number would live in a PCI-scoped vault.
 
-**Why SQLite.** It is a real ACID database with real locking, needs zero setup for a
-reviewer, and its single-writer model makes the concurrency story easy to reason about
-and to test. Section 5 covers what changes with Postgres.
+**Qualified expenses: an MCC allow-list.** Card networks tag every authorization with a
+merchant category code. Medical categories are allowed; everything else, including unknown
+codes, is declined. Failing closed suits a tax-advantaged account: a wrongly approved
+purchase becomes taxable income plus a 20% penalty for the holder, while a wrongly declined
+one is an inconvenience.
+
+**Schema versioning.** `schema.sql` sets `PRAGMA user_version`. On startup `db.init_db`
+creates the schema in a new file, or refuses to open a database from an older version with a
+message saying to delete it. A real system would run migrations; for a local demo, a clear
+refusal beats confusing failures halfway through a request.
+
+**Why SQLite.** A real ACID database with real locking and zero setup. Its single-writer
+model makes the concurrency guarantees easy to reason about and to test.
 
 ## 4. Concurrency handling
 
-The required scenario: balance $100, purchases of $80 and $50 arrive at the same time.
-Only one may be approved, and the balance must never go negative.
+The required scenario: balance $100, purchases of $80 and $50 at the same moment. Only one
+may be approved and the balance must never go negative.
 
-The bug to prevent is the classic **check-then-act race**:
+The bug to prevent is the **check-then-act race**:
 
 ```
 A: read balance = 100     B: read balance = 100
@@ -186,119 +228,99 @@ A: 100 >= 80, approve     B: 100 >= 50, approve
 A: write 100 - 80 = 20    B: write 100 - 50 = 50    <- $130 spent from $100
 ```
 
-Note the final balance there is **$50, which is positive**. A `CHECK (balance >= 0)`
-constraint alone would not catch this lost update. `tests/test_concurrency.py` includes a
-control test that runs exactly this naive code under the same harness and confirms it
-approves both purchases.
+The final balance is **$50, which is positive**, so a `CHECK (balance >= 0)` alone wouldn't
+catch this lost update. `tests/test_concurrency.py` has a control test that runs exactly this
+code under the same harness and confirms it approves both purchases.
 
-### Three layers of protection
+### Three layers
 
-1. **`BEGIN IMMEDIATE` serializes every write transaction** (`db.write_transaction`). The
-   write lock is taken *before* the first read, so the read of the balance, the decision,
-   and the write all happen while no other writer can run. A second purchase waits (up to
-   `busy_timeout`, 10s) and then sees the already-reduced balance.
+1. **`BEGIN IMMEDIATE`** (`db.write_transaction`) takes SQLite's write lock *before* the
+   first read. Reading the balance, deciding and writing all happen while no other writer
+   can run; the next purchase waits and then sees the reduced balance. It has to be
+   `IMMEDIATE`. The default `DEFERRED` starts as a reader and upgrades at the first write,
+   and two transactions that have both read can't both upgrade. SQLite then fails one
+   immediately with `database is locked` rather than waiting (57 such errors under the tests).
+2. **The debit is one conditional statement**:
+   `UPDATE … SET balance_cents = balance_cents - :amount WHERE id = :account AND balance_cents >= :amount RETURNING …`.
+   Checking and taking the money can't be separated; no row back means not enough money.
+3. **`CHECK (balance_cents >= 0)`** turns any overdraft bug that slips through into a
+   rolled-back write instead of a negative balance.
 
-   This is specifically `IMMEDIATE`, not SQLite's default `DEFERRED`. A deferred
-   transaction starts as a reader and upgrades to a writer at its first write; two
-   concurrent deferred transactions that have both read cannot both upgrade, and SQLite
-   fails one *immediately* with `database is locked`, ignoring `busy_timeout`. Under the
-   race tests, switching to plain `BEGIN` produces 56 such errors.
+### Which layer carries the weight? Measured, not assumed
 
-2. **The debit is one conditional statement:**
-   `UPDATE accounts SET balance_cents = balance_cents - :amt WHERE id = :id AND balance_cents >= :amt RETURNING balance_cents`.
-   Checking and taking funds is a single atomic operation; zero rows updated means
-   insufficient funds. This is the same pattern that works on any SQL database without
-   explicit row locks.
-
-3. **`CHECK (balance_cents >= 0)`** turns any remaining overdraft bug into a failed write
-   (HTTP 500 and a rollback) instead of a negative balance.
-
-### Which layer is actually load-bearing? (measured, not assumed)
-
-`scripts/mutation_check.py` removes each layer in a copy of the code and reruns the
+`python scripts/mutation_check.py` removes layers in a copy of the code and reruns the
 concurrency tests:
 
-| Variant | Purchases | Deposit limit under race | Idempotent retries under race | Tests |
+| Variant | Balance under race | Deposit limit under race | Same-key retries under race | Tests |
 | --- | --- | --- | --- | --- |
-| As built (lock + conditional UPDATE + CHECK) | correct | correct | correct | pass |
-| Lock only, debit as read-check-write in Python | correct | correct | correct | pass |
-| Conditional UPDATE only, no lock | correct | **20 of 20 $300 deposits accepted ($6,000 vs $4,400 limit)** | **UNIQUE violation, HTTP 500** | fail |
-| Deferred `BEGIN` | `database is locked` errors | errors | errors | fail |
-| No lock, read-check-write (naive) | **overspends** | overspends | 500s | fail |
+| As built | correct | correct | correct | pass |
+| Lock only (debit as read-check-write) | correct | correct | correct | pass |
+| Conditional UPDATE only, no lock | correct | **20 of 20 $300 deposits accepted ($6,000 vs $4,400)** | **UNIQUE violation, HTTP 500** | fail |
+| Deferred `BEGIN` | `database is locked` | errors | errors | fail |
+| No lock and read-check-write | **overspends** | overspends | errors | fail |
 
-Conclusion: **the transaction lock is the essential guarantee.** The conditional UPDATE
-fully protects the balance on its own, but rules that span multiple rows (the year-to-date
-contribution sum; "has this idempotency key been used?") need the whole check-then-insert
-sequence to be serialized. The conditional UPDATE and CHECK constraint remain as cheap
-defense in depth.
+**The transaction lock is the essential guarantee.** The conditional UPDATE protects the
+balance on its own, but rules spanning several rows (the year-to-date deposit total; "has
+this key been used?") need the whole read-decide-write sequence serialized. The other two
+layers are cheap defense in depth.
 
-### Seeing it happen: server-side lock timings
+### Watching it: server-side lock timings
 
-Each live purchase response includes a `processing` block, measured on the server:
-when the request arrived, when `BEGIN IMMEDIATE` returned (lock acquired), when the last
-statement finished, and when `COMMIT` returned (lock released). These are diagnostics for
-that response only, not persisted. The UI's race timeline draws them directly: an amber
-segment for time spent queued, then a solid segment for time holding the lock, coloured by
-the outcome. `test_lock_holding_intervals_never_overlap` uses the same numbers as a
-correctness check: across 25 simultaneous purchases, no two lock-holding intervals overlap,
-and sorting by lock acquisition reproduces the balance sequence exactly.
+Each purchase response includes `lock_timing`: when the request asked for the lock, got it,
+finished its last statement, and released it. The values come from `time.perf_counter`, a
+monotonic clock. The wall clock (`time.time`) can jump when the system syncs time, which
+would corrupt durations. So the numbers compare across requests in one server process but
+aren't times of day. They're diagnostics for that response and aren't stored.
 
-Two things the timeline makes visible, both worth knowing:
+The race timeline in the UI draws them. The tests use them as evidence too
+(`test_one_purchase_holds_the_lock_at_a_time`):
+1. most requests asked for the lock while another purchase held it, so the threads really
+   overlapped;
+2. no two purchases held the lock at once;
+3. in lock order, each approved purchase saw exactly the balance the previous one left.
 
-- **Idle gaps between bars.** When the lock frees up, the next waiter doesn't start
-  immediately. SQLite's busy handler sleeps for growing intervals (1, 2, 5, 10, 15, 20,
-  25 ms…) between retries, so a waiter can sleep past the moment the lock was released.
-  Correctness is unaffected, but throughput and tail latency suffer under contention. Row
-  locks in Postgres wake the next waiter as soon as the lock is released.
-- **Waves for large batches.** A browser opens at most six HTTP/1.1 connections per host,
-  so a 30-request race from the UI reaches the server in waves. The server-side
-  guarantee does not depend on arrival pattern; the thread-based tests release 40
-  requests simultaneously.
+Two effects the timeline makes visible:
+- **Gaps between bars.** SQLite's busy handler sleeps for growing intervals (1, 2, 5, 10 ms…)
+  between retries, so a waiter can wake after the lock is already free. Correctness is
+  unaffected; throughput under contention suffers. Postgres row locks hand over immediately.
+- **Waves for large batches.** Browsers open at most six connections per host, so a
+  30-purchase race from the UI arrives in waves. The tests release 40 to 90 threads at once.
 
-### Idempotency
+### What the tests cover
 
-Card networks retry on timeouts. Each purchase carries an `idempotency_key` (the UI sends
-a UUID). Inside the locked transaction, a repeated key returns the original result with
-HTTP 200 instead of charging again; the same key with a different amount, card or MCC is
-rejected with `409`. Fifteen simultaneous retries with the same key produce exactly one
-charge (tested).
-
-### How it is tested
-
-- `test_spec_example_100_balance_80_and_50_concurrently`: the brief's exact scenario, 50
-  rounds, two threads released by a `threading.Barrier`. Exactly one approval each round,
-  and the balance matches whichever purchase won.
-- 40 x $10 against $100: exactly 10 approved, balance exactly $0.
-- `balance_after` values of approved purchases form an unbroken sequence
-  (100 - 7, 100 - 14, ...), proving each purchase saw its predecessor's write.
-- Mixed qualified and non-qualified merchants, purchases interleaved with deposits,
-  concurrent deposits against the annual limit, concurrent idempotent retries.
-- `test_http.py` repeats the race with 30 simultaneous HTTP requests against a real
-  threaded server.
-- The UI's Concurrency Lab fires requests with `Promise.all` so a reviewer can watch it live.
+- The brief's scenario, 50 rounds, two threads released by a `threading.Barrier`.
+- 40 × $10 against $100: exactly 10 approved, balance exactly $0.
+- The three-part lock-timing proof above.
+- Qualified and non-qualified purchases racing; purchases racing deposits; 15 simultaneous
+  retries with one key (one charge); 20 simultaneous deposits against the limit (exactly 14).
+- A seeded random mix of 90 deposits, purchases and card freezes across three accounts, then
+  the ledger invariant per account, no approved non-medical purchase, and every "insufficient
+  funds" decline genuinely short of funds.
+- 30 simultaneous HTTP requests against a real threaded server.
+- The mutation check above, which shows the tests fail when the safety is removed.
 
 ## 5. Design tradeoffs
 
-| Decision | Benefit | Cost / what I'd change at scale |
+| Decision | Benefit | Cost, and what I'd change at scale |
 | --- | --- | --- |
-| SQLite, database-wide write lock | Zero setup; simple, provable correctness | All writes, even for unrelated accounts, are serialized. Fine for thousands of TPS of sub-millisecond transactions; not for a real card program. On **Postgres** I would keep the conditional `UPDATE` and replace `BEGIN IMMEDIATE` with `SELECT ... FROM accounts WHERE id = $1 FOR UPDATE` so locking is per account, and back idempotency with the unique constraint plus `ON CONFLICT`. |
-| Stored balance + ledger rows | O(1) balance reads, one row to lock | Two sources that must agree; guarded by tests, would add a nightly reconciliation job in production |
-| MCC allow-list | Simple, explainable, fails closed | Too coarse in both directions: a pharmacy also sells candy; a grocery store's pharmacy counter is declined. Real programs add **IIAS** item-level substantiation (SKU lists from the merchant) and let holders submit receipts for manual review |
-| Purchase is a single-step authorization | Easy to reason about and demo | Real card flows are **authorize then capture/settle**, with holds, partial captures, reversals and refunds. I would model holds as a separate `available` vs `ledger` balance |
-| Declines return HTTP 201 | Clean separation of "processed" vs "invalid request" | Clients must check `status`, not just the HTTP code (documented) |
-| Full PAN shown once, never stored | No sensitive card data at rest | A lost number cannot be retrieved; the user replaces the card (as real issuers do) |
-| No authentication | Lets a reviewer exercise every flow immediately | Mandatory before anything real: per-user auth, accounts scoped to the caller, admin-only card controls |
-| Contribution limits hard-coded in `limits.py` | Visible and tested | Should be a compliance-maintained config table keyed by tax year; prior-year contributions until the tax deadline are not modelled |
-| Vanilla JS UI, no build step | `python run.py` is the whole setup | Less structure than React for a larger UI |
+| SQLite with one database-wide write lock | No setup; easy to prove correct | All writes are serialized, even for unrelated accounts. On **Postgres** I'd keep the conditional `UPDATE`, lock per account with `SELECT … FOR UPDATE`, and use `INSERT … ON CONFLICT` for idempotency |
+| Stored balance plus ledger rows | One row to lock; O(1) reads | Two sources that must agree. Tested here; production would add a reconciliation job |
+| MCC allow-list | Simple, explainable, fails closed | Coarse: a pharmacy also sells candy, a grocery pharmacy counter is declined. Real programs add item-level checks (IIAS) and receipt review |
+| Single-step authorization | Easy to reason about and demo | Real card flows authorize, then capture, with holds, reversals and refunds |
+| Declines are HTTP 201 | "Processed" and "invalid" stay separate | Clients must read `status`, not just the HTTP code |
+| Requests take dollars (`"12.34"`), responses give cents | Forms send what people type; responses can't be misread as floats | Asymmetric. A pure API would take cents both ways, as Stripe does |
+| Tax year from the UTC date | One unambiguous rule | A deposit at 9 pm on Dec 31 in Michigan counts toward the next year; prior-year contributions until April aren't modelled |
+| Old database refused, not migrated | No migration code for a demo | A real deployment needs migrations |
+| `list_accounts` runs two queries per account | Simple code | Fine for a demo; a JOIN or batch query at scale |
+| No authentication | Reviewers can try every flow immediately | Required before anything real |
+| Plain JS UI, no build step | `python run.py` is the whole setup | Less structure than a framework for a bigger UI |
 
-## 6. What I would improve with more time
+## 6. What I'd improve with more time
 
-1. Authorize/capture with holds, reversals and refunds (refunds credit the balance back).
-2. Postgres with per-account row locks (removing SQLite's busy-handler polling gaps visible
-   in the race timeline), plus a load test showing throughput across many accounts.
-3. Authentication and authorization; audit log of who did what.
-4. IIAS-style item-level eligibility and a receipt-substantiation flow for edge cases.
-5. Withdrawals/reimbursements to a bank account, and the 20% penalty logic for
-   non-qualified distributions before age 65.
-6. Contribution limits as data; employer vs. employee contributions; prior-year contributions.
-7. Structured logging and metrics (decline rate by reason, lock wait time).
+1. Authorize-then-capture with holds, reversals and refunds.
+2. Postgres with per-account row locks (removing the busy-handler gaps), plus a load test.
+3. Authentication; accounts scoped to the signed-in user.
+4. Closing an account: pay out the balance, cancel the card.
+5. Item-level eligibility (IIAS) and receipt substantiation.
+6. Contribution limits as data; employer contributions; prior-year contributions.
+7. Metrics: decline rate by reason, lock wait time.

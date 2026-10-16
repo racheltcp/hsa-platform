@@ -21,8 +21,10 @@ pip install -r requirements.txt
 python run.py
 ```
 
-Open **http://localhost:8000**. (Not 5000: macOS's AirPlay Receiver already uses that port.) Data is stored in `data/hsa.db` (created on first run).
-To start fresh, stop the server and delete the `data/` folder.
+Open **http://localhost:8000**. (Not 5000: macOS's AirPlay Receiver already uses that port.)
+Data is stored in `data/hsa.db`, created on first run. To start fresh, stop the server and
+delete the `data/` folder. If you ran an earlier version of this project, the app will say
+its database is out of date: delete `data/` and start again.
 
 Options: `python run.py --port 9000 --db /path/to/other.db`
 
@@ -39,9 +41,11 @@ On macOS use `python3`/`pip3` outside the virtual environment; inside it, `pytho
    left. Click it a few times: which purchase wins depends on arrival order, and both
    outcomes are correct.
 2. **Create an account** with "New account" (name, email, date of birth, health plan coverage).
+   Try a future date of birth or a duplicate email: the error appears next to the field.
 3. **Deposit funds.** Try depositing more than $4,400 in total on a self-only account to see
    the IRS annual limit enforced.
-4. **Issue a virtual card.** The full number is shown once; only the last 4 digits are stored.
+4. **Issue a virtual card.** Until you do, the swipe and race panels are locked with a button
+   to issue one. The full number is shown once; only the last 4 digits are stored.
 5. **Swipe the card** using the merchant presets: Pharmacy, Hospital, Dentist and
    Eyeglasses are approved; Restaurant, Electronics and Grocery are declined. Each swipe
    prints a slip listing the five checks in order and which one failed.
@@ -55,8 +59,16 @@ On macOS use `python3`/`pip3` outside the virtual environment; inside it, `pytho
 ## Run the tests
 
 ```bash
-python -m unittest discover -s tests -t . -v      # 42 tests, ~5 seconds
+python -m unittest discover -s tests -t . -v      # 48 tests, ~7 seconds
 python scripts/mutation_check.py                  # proves the race tests can catch races
+```
+
+Optional, a 29-step walkthrough in a headless browser (needs Playwright, which the app
+itself doesn't):
+
+```bash
+pip install playwright && python -m playwright install chromium
+python scripts/e2e_check.py
 ```
 
 `mutation_check.py` copies the project to a temp folder, deliberately breaks the concurrency
@@ -72,8 +84,8 @@ controls one at a time, and confirms the concurrency tests fail for every unsafe
 
 ## API
 
-All endpoints take and return JSON. Amounts are sent as decimal strings (`"12.34"`) and
-returned both as strings and integer cents.
+All endpoints take and return JSON. Requests send amounts as dollar strings (`"12.34"`);
+responses return integer cents (`amount_cents`, `balance_cents`).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -87,10 +99,12 @@ returned both as strings and integer cents.
 | `POST` | `/api/transactions` | Authorize a purchase: `card_id`, `amount`, `merchant_name`, `mcc`, optional `idempotency_key` |
 | `GET` | `/api/merchant-categories` | Known MCCs and whether each is qualified |
 
-Status codes: `201` created (including **declined** purchases, which are a valid business
-outcome, not an error), `200` idempotent replay, `404` unknown account/card, `409` conflict
-(duplicate email, contribution limit, card already issued, reused idempotency key),
-`422` invalid input. Errors look like `{"error": {"code": "...", "message": "..."}}`.
+Status codes: `201` created (including **declined** purchases, which are a valid outcome,
+not an error), `200` idempotent replay, `400` body isn't JSON, `404` unknown account or card,
+`409` conflict (duplicate email, contribution limit, card already issued, reused idempotency
+key), `422` invalid input, `503` busy (retry), `500` bug. Every error, crashes included, is
+JSON: `{"error": {"code": "...", "message": "...", "field": "amount"}}`, where `field`
+names the input at fault so the UI can show the message next to it.
 
 Example with curl:
 
@@ -109,20 +123,25 @@ curl -s localhost:8000/api/transactions -H 'Content-Type: application/json' \
 
 ```
 app/
-  __init__.py      Flask app factory
-  api.py           HTTP routes (thin: parse JSON, call services, shape responses)
-  services.py      Business logic: accounts, deposits, cards, purchase authorization
-  db.py            Connections + BEGIN IMMEDIATE write transactions
-  schema.sql       Tables, CHECK constraints, partial unique index
+  api.py           HTTP routes; every error, crashes included, becomes JSON
+  accounts.py      Accounts, deposits within the IRS limit, the activity feed
+  cards.py         Issue, replace and freeze cards
+  purchases.py     Authorization: the ordered CHECKS, the locked debit, the decision trace
+  db.py            Connections, schema version check, write_transaction (BEGIN IMMEDIATE)
+  schema.sql       Tables and the rules the database enforces itself
   merchants.py     MCC allow-list for qualified medical expenses
   limits.py        IRS annual contribution limits
-  money.py         Dollar string <-> integer cents
+  money.py         Dollar strings to integer cents, and back
+  common.py        Clock, IDs, input helpers
   static/          index.html, app.js, styles.css, fonts/ (Public Sans, bundled; OFL)
 tests/
-  test_business_rules.py   Single-threaded rules
-  test_concurrency.py      Thread races + a naive-implementation control
-  test_http.py             API contract + races through a real threaded HTTP server
-scripts/mutation_check.py  Verifies the race tests detect broken concurrency control
+  test_business_rules.py   One request at a time
+  test_concurrency.py      Thread races, a random mixed workload, and a naive-code control
+  test_http.py             API contract, error shapes, race through a real HTTP server
+  test_db.py               Schema creation and refusing an old database
+scripts/
+  mutation_check.py        Breaks the concurrency control on purpose; the tests must notice
+  e2e_check.py             Browser walkthrough (optional, needs Playwright)
 ```
 
 ## Demo video

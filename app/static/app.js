@@ -1,12 +1,12 @@
-// HSA Simulator UI. Vanilla JS, no build step. Talks to the JSON API under /api.
+// HSA Simulator UI. Plain JavaScript, no build step. Talks to the JSON API under /api.
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const state = {
   accounts: [],
   selectedId: null,
   categories: [],
-  revealedCard: null,     // card returned at issuance (only time the full number exists)
-  expanded: new Set(),    // ledger rows showing their checks
+  revealedCard: null,     // the card as returned at issuance, the only time the full number exists
+  expanded: new Set(),    // ledger rows currently showing their checks
 };
 
 const PRESETS = [
@@ -19,43 +19,46 @@ const PRESETS = [
   { name: "FreshMart Grocery", mcc: "5411", label: "Grocery" },
 ];
 const RACE_MERCHANTS = { 5912: "Corner Pharmacy", 8062: "St. Mercy Hospital", 5812: "Trattoria Roma" };
-
 const REASONS = {
   INSUFFICIENT_FUNDS: "Not enough money",
   NOT_QUALIFIED_MEDICAL_EXPENSE: "Not a medical expense",
   CARD_FROZEN: "Card frozen",
-  CARD_CANCELLED: "Card cancelled",
+  CARD_CANCELLED: "Card was replaced",
   CARD_EXPIRED: "Card expired",
-  ACCOUNT_CLOSED: "Account closed",
 };
 
 // ---------------------------------------------------------------- helpers
 
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-}
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const usd = (cents) => (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const toCents = (s) => Math.round(Number(String(s).replace(/[$,\s]/g, "")) * 100);
-const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const timeOfDay = (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 const longDate = (isoDate) => new Date(`${isoDate}T12:00:00`).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const ms = (v) => (v < 10 ? v.toFixed(1) : Math.round(v)) + " ms";
+const ordinal = (n) => n + (["th", "st", "nd", "rd"][((n % 100) - 20) % 10] || ["th", "st", "nd", "rd"][n % 100] || "th");
+const selected = () => state.accounts.find((a) => a.id === state.selectedId);
 
 class ApiError extends Error {
   constructor(status, body) {
-    super(body?.error?.message || `The server answered ${status}`);
-    this.status = status;
+    super(body?.error?.message || `The server answered ${status}.`);
+    this.field = body?.error?.field || null;
   }
 }
 
 async function api(path, { method = "GET", body } = {}) {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new ApiError(0, { error: { message: "Can't reach the server. Is `python run.py` still running?" } });
+  }
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new ApiError(res.status, data);
   return data;
@@ -69,14 +72,54 @@ function toast(message, kind = "info") {
   setTimeout(() => el.remove(), kind === "error" ? 6000 : 3000);
 }
 
-async function busy(button, fn) {
-  if (button) button.disabled = true;
-  try { return await fn(); }
-  catch (err) { toast(err.message, "error"); }
-  finally { if (button) button.disabled = false; }
+// ---------------------------------------------------------------- form errors
+
+/** Show an error under the input it belongs to, so the message sits where the fix is. */
+function showFieldError(form, field, message) {
+  const input = form.elements[field];
+  if (!input) return false;
+  const label = input.closest("label");
+  const note = document.createElement("span");
+  note.className = "field-error";
+  note.id = `${form.id}-${field}-error`;
+  note.textContent = message;
+  label.appendChild(note);
+  input.setAttribute("aria-invalid", "true");
+  input.setAttribute("aria-describedby", note.id);
+  input.focus();
+  return true;
 }
 
-const selected = () => state.accounts.find((a) => a.id === state.selectedId);
+function clearFieldErrors(form) {
+  form.querySelectorAll(".field-error").forEach((el) => el.remove());
+  form.querySelectorAll("[aria-invalid]").forEach((el) => {
+    el.removeAttribute("aria-invalid");
+    el.removeAttribute("aria-describedby");
+  });
+}
+
+/** Run a form's action: disable its button, and put any error next to the right field. */
+async function submitForm(form, action) {
+  const button = form.querySelector("[type=submit]");
+  clearFieldErrors(form);
+  button.disabled = true;
+  try {
+    await action();
+  } catch (err) {
+    if (!(err.field && showFieldError(form, err.field, err.message))) toast(err.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function withButton(button, action) {
+  button.disabled = true;
+  try { await action(); }
+  catch (err) { toast(err.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+// ---------------------------------------------------------------- loading
 
 function selectAccount(id) {
   state.selectedId = id;
@@ -84,15 +127,12 @@ function selectAccount(id) {
   state.expanded.clear();
   $("#slip-area").innerHTML = `<p class="slip-empty">Swipe the card to see each check the purchase goes through.</p>`;
   $("#race-result").innerHTML = "";
+  document.querySelectorAll("form").forEach(clearFieldErrors);
 }
-
-// ---------------------------------------------------------------- loading
 
 async function refresh() {
   state.accounts = await api("/accounts");
-  if (!state.accounts.some((a) => a.id === state.selectedId)) {
-    selectAccount(state.accounts[0]?.id ?? null);
-  }
+  if (!state.accounts.some((a) => a.id === state.selectedId)) selectAccount(state.accounts[0]?.id ?? null);
   renderShell();
   if (selected()) await renderAccount();
 }
@@ -116,18 +156,17 @@ async function renderAccount() {
   $("#acct-balance").textContent = usd(acct.balance_cents);
 
   const c = acct.contributions;
-  const pct = Math.min(100, (c.contributed_cents / c.annual_limit_cents) * 100);
   $("#limit-label").textContent = `Contributed in ${c.tax_year}`;
-  $("#limit-bar").style.width = `${pct}%`;
-  const meter = $("#limit-meter");
-  meter.setAttribute("aria-valuemax", c.annual_limit_cents);
-  meter.setAttribute("aria-valuenow", c.contributed_cents);
-  $("#limit-text").textContent = `${usd(c.contributed_cents)} of the ${usd(c.annual_limit_cents)} IRS limit`;
+  $("#limit-bar").style.width = `${Math.min(100, (c.contributed_cents / c.limit_cents) * 100)}%`;
+  $("#limit-meter").setAttribute("aria-valuemax", c.limit_cents);
+  $("#limit-meter").setAttribute("aria-valuenow", c.contributed_cents);
+  $("#limit-text").textContent = `${usd(c.contributed_cents)} of the ${usd(c.limit_cents)} IRS limit`;
   $("#deposit-hint").textContent = c.remaining_cents > 0
     ? `You can deposit ${usd(c.remaining_cents)} more in ${c.tax_year} before reaching the IRS limit.`
     : `This account has reached its ${c.tax_year} IRS limit. Deposits will be refused until January.`;
 
   renderCard(acct);
+  renderGates(acct);
   updateContention();
   await renderLedger(acct.id);
 }
@@ -135,14 +174,13 @@ async function renderAccount() {
 function renderCard(acct) {
   const card = acct.card;
   const visual = $("#card-visual");
-  const once = $("#card-once");
-  const revealed = state.revealedCard && card && state.revealedCard.id === card.id ? state.revealedCard : null;
+  const revealed = card && state.revealedCard?.id === card.id ? state.revealedCard : null;
 
   if (!card) {
     visual.className = "card-visual none";
     visual.innerHTML = `<p><b>No card yet</b><br>Issue a virtual card to start swiping.</p>`;
     $("#card-actions").innerHTML = `<button class="btn primary" data-card="issue" type="button">Issue virtual card</button>`;
-    once.hidden = true;
+    $("#card-once").hidden = true;
     return;
   }
   const exp = `${String(card.exp_month).padStart(2, "0")}/${String(card.exp_year).slice(-2)}`;
@@ -151,13 +189,23 @@ function renderCard(acct) {
     <div class="card-top"><span class="card-chip" aria-hidden="true"></span><span>HSA debit</span></div>
     <div class="card-number" aria-label="Card number">${esc(revealed ? revealed.number : `•••• •••• •••• ${card.last4}`)}</div>
     <div class="card-bottom"><span>${esc(acct.holder_name)}</span><span>Expires ${exp}</span></div>`;
-  once.hidden = !revealed;
-  once.textContent = "This is the only time the full number is shown. The server keeps just the last four digits.";
+  $("#card-once").hidden = !revealed;
+  $("#card-once").textContent = "This is the only time the full number is shown. The server keeps just the last four digits.";
   $("#card-actions").innerHTML = `
     ${card.status === "active"
       ? `<button class="btn" data-card="freeze" type="button">Freeze card</button>`
       : `<button class="btn" data-card="unfreeze" type="button">Unfreeze card</button>`}
     <button class="btn danger" data-card="replace" type="button">Replace card</button>`;
+}
+
+/** Without a card there is nothing to swipe. Say so where the person is looking,
+    with the button that fixes it, instead of letting them fill in a form first. */
+function renderGates(acct) {
+  for (const id of ["form-purchase", "form-race"]) {
+    const form = $(`#${id}`);
+    form.querySelector("fieldset").disabled = !acct.card;
+    $(`.gate`, form.parentElement).hidden = Boolean(acct.card);
+  }
 }
 
 function checksHtml(decision) {
@@ -190,7 +238,7 @@ async function renderLedger(accountId) {
   body.innerHTML = items.map((i) => {
     if (i.kind === "deposit") {
       return `<tr>
-        <td>${clock(i.created_at)}</td>
+        <td>${timeOfDay(i.created_at)}</td>
         <td>Deposit<span class="sub">Counts toward ${i.tax_year}</span></td>
         <td><span class="result-tag in">Credited</span></td>
         <td class="num">+${usd(i.amount_cents)}</td>
@@ -199,7 +247,7 @@ async function renderLedger(accountId) {
     const ok = i.status === "approved";
     const open = state.expanded.has(i.id);
     return `<tr>
-        <td>${clock(i.created_at)}</td>
+        <td>${timeOfDay(i.created_at)}</td>
         <td>${esc(i.merchant_name)}<span class="sub">${esc(i.merchant_category)}, MCC ${esc(i.mcc)}</span></td>
         <td><span class="result-tag ${ok ? "ok" : "no"}">${ok ? "Approved" : `Declined: ${esc(REASONS[i.decline_reason] || i.decline_reason)}`}</span>
           <button class="linkish" type="button" data-trace="${esc(i.id)}" aria-expanded="${open}">${open ? "Hide checks" : "Show checks"}</button></td>
@@ -210,11 +258,11 @@ async function renderLedger(accountId) {
 }
 
 function renderCategorySelect() {
+  const option = (c) => `<option value="${c.mcc}">${esc(c.label)} (${c.mcc})</option>`;
   const qualified = state.categories.filter((c) => c.qualified);
-  const other = state.categories.filter((c) => !c.qualified);
   $("#mcc-select").innerHTML =
-    `<optgroup label="Medical (approved)">${qualified.map((c) => `<option value="${c.mcc}">${esc(c.label)} (${c.mcc})</option>`).join("")}</optgroup>
-     <optgroup label="Not medical (declined)">${other.map((c) => `<option value="${c.mcc}">${esc(c.label)} (${c.mcc})</option>`).join("")}
+    `<optgroup label="Medical (approved)">${qualified.map(option).join("")}</optgroup>
+     <optgroup label="Not medical (declined)">${state.categories.filter((c) => !c.qualified).map(option).join("")}
        <option value="1234">Unknown category (1234)</option></optgroup>`;
   const ok = new Set(qualified.map((c) => c.mcc));
   $("#merchant-presets").innerHTML = PRESETS.map((p, i) =>
@@ -225,10 +273,9 @@ function renderCategorySelect() {
 }
 
 function applyPreset(i) {
-  const p = PRESETS[i];
   const form = $("#form-purchase");
-  form.merchant_name.value = p.name;
-  form.mcc.value = p.mcc;
+  form.merchant_name.value = PRESETS[i].name;
+  form.mcc.value = PRESETS[i].mcc;
   document.querySelectorAll("[data-preset]").forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.preset) === i)));
 }
 
@@ -241,123 +288,130 @@ function raceAmounts() {
   return Array.from({ length: repeat }, () => base).flat();
 }
 
-/** Tell the reviewer, before they press send, whether this setup can actually show a race. */
+/** Before anything is sent, say whether this setup can show a race at all. */
 function updateContention({ afterRace = false } = {}) {
-  const acct = selected();
   const box = $("#contention");
-  if (!acct) return;
-  if (afterRace) { box.className = "contention"; box.textContent = ""; return; }
+  const [kind, html] = afterRace ? ["", ""] : contentionMessage(selected());
+  // Only touch the DOM when the message changes. Leaving the amounts field fires
+  // "change"; redrawing then would swap out the suggestion button between
+  // mouse-down and mouse-up, and the click would never land.
+  if (box.innerHTML === html && box.className === `contention ${kind}`.trim()) return;
+  box.className = `contention ${kind}`.trim();
+  box.innerHTML = html;
+}
+
+function contentionMessage(acct) {
+  if (!acct?.card) return ["", ""];
   const amounts = raceAmounts();
   const cents = amounts.map(toCents);
-  box.className = "contention";
-  if (!acct.card) { box.textContent = "Issue a card first."; return; }
-  if (!amounts.length || cents.some((c) => !(c > 0))) { box.textContent = "Enter amounts like 80, 50."; return; }
+  if (!amounts.length || cents.some((c) => !(c > 0))) return ["", "Enter amounts like 80, 50."];
   const total = cents.reduce((a, b) => a + b, 0);
   const n = plural(amounts.length, "purchase");
   const all = amounts.length === 2 ? "both purchases" : `all ${n}`;
+
+  if (acct.card.status === "frozen") return ["", `The card is frozen, so ${all} will be declined. Unfreeze it to see a race.`];
   if ($("#form-race").mcc.value === "5812") {
-    box.textContent = `A restaurant isn't a medical expense, so ${all} will be declined before the balance is even checked.`;
-    return;
+    return ["", `A restaurant isn't a medical expense, so ${all} will be declined before the balance is even checked.`];
   }
-  if (acct.balance_cents === 0) {
-    box.textContent = "The balance is $0.00, so every purchase will be declined. Add money first.";
-    return;
-  }
+  if (acct.balance_cents === 0) return ["", "The balance is $0.00, so every purchase will be declined. Add money first."];
   if (total <= acct.balance_cents) {
     const a = Math.max(1, Math.round(acct.balance_cents * 0.8 / 100));
     const b = Math.max(1, Math.round(acct.balance_cents * 0.5 / 100));
-    box.className = "contention calm";
-    box.innerHTML = `The balance of ${usd(acct.balance_cents)} covers ${all} (${usd(total)}), so none has to be declined and nothing competes for the money.
-      <button class="btn" type="button" id="btn-make-race" data-a="${a}" data-b="${b}">Use $${a} and $${b} instead</button>`;
-    return;
+    return ["calm", `The balance of ${usd(acct.balance_cents)} covers ${all} (${usd(total)}), so none has to be declined and nothing competes for the money. ` +
+      `<button class="btn" type="button" id="btn-make-race" data-a="${a}" data-b="${b}">Use $${a} and $${b} instead</button>`];
   }
-  box.textContent = `${n[0].toUpperCase() + n.slice(1)} totaling ${usd(total)} against a balance of ${usd(acct.balance_cents)}: some must be declined. Which ones depends on who reaches the lock first.`;
+  return ["", `${n[0].toUpperCase() + n.slice(1)} totaling ${usd(total)} against a balance of ${usd(acct.balance_cents)}: some must be declined. Which ones depends on who gets the lock first.`];
 }
 
-async function fireConcurrently(cardId, amounts, mcc) {
+function fireConcurrently(cardId, amounts, mcc) {
   const name = RACE_MERCHANTS[mcc] || "Merchant";
   // Promise.all with no awaits in between: every request leaves the browser together.
   return Promise.all(amounts.map((amount, idx) =>
     api("/transactions", {
       method: "POST",
       body: { card_id: cardId, amount, mcc, merchant_name: `${name}, request ${idx + 1}`, idempotency_key: uuid() },
-    }).then((t) => ({ ok: true, t, idx, amount }), (e) => ({ ok: false, e, idx, amount }))));
+    }).then((t) => ({ ok: true, t }), (e) => ({ ok: false, e }))));
 }
 
-function niceStep(span) {
+/** Turn the server's lock timings into positions on a shared time axis. */
+function timelineLayout(txns) {
+  const rows = [...txns].sort((a, b) => a.lock_timing.acquired_ms - b.lock_timing.acquired_ms);
+  const start = Math.min(...rows.map((t) => t.lock_timing.requested_ms));
+  const end = Math.max(...rows.map((t) => t.lock_timing.released_ms));
+  const span = Math.max(end - start, 0.5);
+  const at = (v) => ((v - start) / span) * 100;
+  let idle = 0;
+  rows.forEach((t, i) => {
+    if (i) idle += Math.max(0, t.lock_timing.acquired_ms - rows[i - 1].lock_timing.released_ms);
+  });
+  return {
+    rows, span, at,
+    askedWithin: Math.max(...rows.map((t) => t.lock_timing.requested_ms)) - start,
+    idleShare: idle / span,
+  };
+}
+
+function axisTicks(span) {
   const raw = span / 4;
   const pow = 10 ** Math.floor(Math.log10(raw));
-  return [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw) || raw;
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw);
+  const ticks = [];
+  for (let v = 0; v <= span + 1e-9; v += step) ticks.push(v);
+  return ticks;
+}
+
+function timelineRowHtml(t, i, at, stagger) {
+  const { requested_ms: req, acquired_ms: acq, released_ms: rel } = t.lock_timing;
+  const ok = t.status === "approved";
+  const delay = (extra = 0) => `--d:${(i * stagger + extra).toFixed(2)}s`;
+  return `<div class="tl-row" role="row">
+    <div class="tl-name" role="cell"><b>${usd(t.amount_cents)}</b><span>${ordinal(i + 1)} to get the lock</span></div>
+    <div class="tl-track" role="cell" aria-label="Waited ${ms(acq - req)} for the lock, then held it ${ms(rel - acq)}">
+      <span class="seg wait" style="left:${at(req)}%;width:${at(acq) - at(req)}%;${delay()}"></span>
+      <span class="seg hold ${ok ? "ok" : "no"}" style="left:${at(acq)}%;width:${at(rel) - at(acq)}%;${delay(0.15)}"></span>
+    </div>
+    <div class="tl-out" role="cell" style="${delay()}"><b class="${ok ? "ok" : "no"}">${ok ? "Approved" : "Declined"}</b>
+      <span>${ok ? `${usd(t.balance_after_cents)} left` : esc(REASONS[t.decline_reason])}, waited ${ms(acq - req)}</span></div>
+  </div>`;
 }
 
 function renderRace(target, { startCents, results, finalCents }) {
-  const txns = results.filter((r) => r.ok && r.t.processing).map((r) => r.t);
+  const txns = results.filter((r) => r.ok && r.t.lock_timing).map((r) => r.t);
   const errors = results.filter((r) => !r.ok);
   if (!txns.length) {
-    target.innerHTML = `<p class="tl-note">No purchase went through. ${errors.map((r) => esc(r.e.message)).join(" ")}</p>`;
+    target.innerHTML = `<p class="tl-note">No purchase was processed. ${esc(errors[0]?.e.message || "")}</p>`;
     return;
   }
-  const rows = [...txns].sort((a, b) => a.processing.lock_acquired_at_ms - b.processing.lock_acquired_at_ms);
-  const t0 = Math.min(...rows.map((t) => t.processing.received_at_ms));
-  const tEnd = Math.max(...rows.map((t) => t.processing.committed_at_ms));
-  const span = Math.max(tEnd - t0, 0.5);
-  const pct = (t) => `${((t - t0) / span) * 100}%`;
-  const width = (a, b) => `${Math.max(((b - a) / span) * 100, 0)}%`;
-  const arrivalSpread = Math.max(...rows.map((t) => t.processing.received_at_ms)) - t0;
-
+  const { rows, span, at, askedWithin, idleShare } = timelineLayout(txns);
   const approved = rows.filter((t) => t.status === "approved");
   const spent = approved.reduce((s, t) => s + t.amount_cents, 0);
   const consistent = finalCents === startCents - spent && finalCents >= 0 && !errors.length;
-
-  let idle = 0;
-  rows.forEach((t, i) => { if (i) idle += Math.max(0, t.processing.lock_acquired_at_ms - rows[i - 1].processing.committed_at_ms); });
-
-  const step = niceStep(span);
-  const ticks = [];
-  for (let v = 0; v <= span + 1e-9; v += step) ticks.push(v);
-
   const stagger = Math.min(0.12, 1.2 / rows.length);
+
   target.innerHTML = `
     <div class="timeline">
       <p class="tl-summary">
-        ${plural(rows.length, "purchase")} reached the server within ${ms(arrivalSpread)} of each other.
-        The lock let them through one at a time:
+        ${plural(rows.length, "purchase")} asked for the account's lock within ${ms(askedWithin)} of each other.
+        It let them through one at a time:
         <span class="num-ok">${approved.length} approved</span>, <span class="num-no">${rows.length - approved.length} declined</span>,
         and the balance went from ${usd(startCents)} to ${usd(finalCents)}${consistent ? ", never below zero." : "."}
       </p>
-      ${consistent ? "" : `<p class="tl-note" style="color:var(--decline)">Something is off: ${errors.length} request(s) failed or the balance does not match ${usd(startCents)} minus ${usd(spent)}.</p>`}
+      ${consistent ? "" : `<p class="tl-note warn">Something doesn't add up: ${plural(errors.length, "request")} failed, or the balance isn't ${usd(startCents)} minus ${usd(spent)}. ${esc(errors[0]?.e.message || "")}</p>`}
       <div class="tl-legend" aria-hidden="true">
         <span><i class="sw wait"></i>Waiting for the lock</span>
-        <span><i class="sw hold" style="background:var(--approve)"></i>Holding the lock, approved</span>
-        <span><i class="sw hold" style="background:var(--decline)"></i>Holding the lock, declined</span>
+        <span><i class="sw ok"></i>Holding the lock, approved</span>
+        <span><i class="sw no"></i>Holding the lock, declined</span>
       </div>
-      <div class="tl-grid${rows.length > 12 ? " dense" : ""}" role="table" aria-label="Purchases in the order they acquired the lock">
-        ${rows.map((t, i) => {
-          const p = t.processing;
-          const ok = t.status === "approved";
-          return `<div class="tl-row" role="row" style="--d:${(i * stagger).toFixed(2)}s">
-            <div class="tl-name" role="cell"><b>${usd(t.amount_cents)}</b><span>${ordinal(i + 1)} through</span></div>
-            <div class="tl-track" role="cell" aria-label="Waited ${ms(p.lock_wait_ms)}, held the lock ${ms(p.lock_held_ms)}">
-              <span class="seg wait" style="left:${pct(p.received_at_ms)};width:${width(p.received_at_ms, p.lock_acquired_at_ms)};--d:${(i * stagger).toFixed(2)}s"></span>
-              <span class="seg hold ${ok ? "ok" : "no"}" style="left:${pct(p.lock_acquired_at_ms)};width:${width(p.lock_acquired_at_ms, p.committed_at_ms)};--d:${(i * stagger + 0.15).toFixed(2)}s"></span>
-            </div>
-            <div class="tl-out" role="cell"><b class="${ok ? "ok" : "no"}">${ok ? "Approved" : `Declined`}</b>
-              <span>${ok ? `${usd(t.balance_after_cents)} left` : esc(REASONS[t.decline_reason] || t.decline_reason)}, waited ${ms(p.lock_wait_ms)}</span></div>
-          </div>`;
-        }).join("")}
-        <div class="tl-axis" aria-hidden="true">${ticks.map((v) => `<span style="left:${(v / span) * 100}%">${v === 0 ? "0 ms" : ms(v)}</span>`).join("")}</div>
+      <div class="tl-grid${rows.length > 12 ? " dense" : ""}" role="table" aria-label="Purchases in the order they got the lock">
+        ${rows.map((t, i) => timelineRowHtml(t, i, at, stagger)).join("")}
+        <div class="tl-axis" aria-hidden="true">${axisTicks(span).map((v) => `<span style="left:${(v / span) * 100}%">${v === 0 ? "0 ms" : ms(v)}</span>`).join("")}</div>
       </div>
-      <p class="tl-note">Each bar is one request, timed on the server. A purchase only starts holding the lock after the one above it has let go, which is why the second purchase sees the balance the first one left.</p>
-      ${rows.length > 6 ? `<p class="tl-note">Browsers open at most six connections to one server, so a batch of ${rows.length} leaves the browser in waves. The server-side guarantee is the same either way, and the automated tests fire 40 at once from threads.</p>` : ""}
-      ${idle > span * 0.15 ? `<p class="tl-note">The empty space between bars is SQLite's busy handler: a waiting request sleeps for a growing interval (1, 2, 5, 10 ms and so on) before trying the lock again. A database with row-level locks, such as Postgres, wakes the next request the moment the lock is free.</p>` : ""}
+      <p class="tl-note">Each row is one request, timed on the server. A purchase starts holding the lock only after the one above it lets go, which is why each one sees the balance the previous one left.</p>
+      ${rows.length > 6 ? `<p class="tl-note">Browsers open at most six connections to one server, so a batch of ${rows.length} leaves the browser in waves. The server's guarantee doesn't depend on that, and the automated tests release 40 at once from threads.</p>` : ""}
+      ${idleShare > 0.15 ? `<p class="tl-note">The gaps between bars are SQLite's busy handler: a waiting request sleeps for a growing interval (1, 2, 5, 10 ms and so on) before trying again, so it can wake up after the lock is already free. A database with row locks, such as Postgres, hands the lock over immediately.</p>` : ""}
     </div>`;
   const tl = $(".timeline", target);
   requestAnimationFrame(() => tl.classList.add("play"));
-}
-
-function ordinal(n) {
-  const s = ["th", "st", "nd", "rd"], v = n % 100;
-  return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
 async function runRace(accountId, cardId, amounts, mcc) {
@@ -369,14 +423,13 @@ async function runRace(accountId, cardId, amounts, mcc) {
 }
 
 async function runScenario() {
-  const stamp = Date.now().toString(36).slice(-4);
+  const stamp = uuid().slice(0, 4);
   const acct = await api("/accounts", {
     method: "POST",
-    body: { holder_name: `Race demo ${stamp}`, email: `race-${stamp}-${uuid().slice(0, 6)}@example.com`, date_of_birth: "1990-01-01", coverage_type: "self_only" },
+    body: { holder_name: `Race demo ${stamp}`, email: `race-${stamp}-${uuid().slice(0, 8)}@example.com`, date_of_birth: "1990-01-01", coverage_type: "self_only" },
   });
   await api(`/accounts/${acct.id}/deposits`, { method: "POST", body: { amount: "100.00", idempotency_key: uuid() } });
   const card = await api(`/accounts/${acct.id}/cards`, { method: "POST", body: {} });
-  await refresh();
   selectAccount(acct.id);
   const form = $("#form-race");
   form.amounts.value = "80, 50";
@@ -389,26 +442,39 @@ async function runScenario() {
 // ---------------------------------------------------------------- events
 
 const dialog = $("#dialog-account");
-function openNewAccount() { dialog.showModal(); $("[name=holder_name]", dialog).focus(); }
+function openNewAccount() {
+  clearFieldErrors($("#form-account"));
+  dialog.showModal();
+  $("[name=holder_name]", dialog).focus();
+}
 
 $("#btn-new-account").addEventListener("click", openNewAccount);
 $("#btn-cancel-account").addEventListener("click", () => dialog.close());
-$("#btn-scenario").addEventListener("click", (e) => busy(e.currentTarget, runScenario));
+$("#btn-scenario").addEventListener("click", (e) => withButton(e.currentTarget, runScenario));
 $("#welcome").addEventListener("click", (e) => {
   const b = e.target.closest("[data-action]");
-  if (!b) return;
-  if (b.dataset.action === "new-account") openNewAccount();
-  else busy(b, runScenario);
+  if (b?.dataset.action === "new-account") openNewAccount();
+  else if (b) withButton(b, runScenario);
+});
+$("#workspace").addEventListener("click", (e) => {
+  if (e.target.closest("[data-action=issue]")) $("#card-actions [data-card=issue]")?.click();
+});
+
+// Typing in a field clears the error pinned to it.
+document.addEventListener("input", (e) => {
+  if (e.target.getAttribute?.("aria-invalid")) {
+    e.target.closest("label")?.querySelector(".field-error")?.remove();
+    e.target.removeAttribute("aria-invalid");
+  }
 });
 
 $("#form-account").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.currentTarget;
-  busy(form.querySelector("[type=submit]"), async () => {
+  submitForm(form, async () => {
     const acct = await api("/accounts", { method: "POST", body: Object.fromEntries(new FormData(form)) });
     dialog.close();
-    form.holder_name.value = "";
-    form.email.value = "";
+    form.reset();
     selectAccount(acct.id);
     toast(`Created an account for ${acct.holder_name}`);
     await refresh();
@@ -428,7 +494,7 @@ $("#deposit-quick").addEventListener("click", (e) => {
 $("#form-deposit").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.currentTarget;
-  busy(form.querySelector("[type=submit]"), async () => {
+  submitForm(form, async () => {
     const dep = await api(`/accounts/${state.selectedId}/deposits`, {
       method: "POST", body: { amount: form.amount.value, idempotency_key: uuid() },
     });
@@ -442,14 +508,13 @@ $("#card-actions").addEventListener("click", (e) => {
   const btn = e.target.closest("[data-card]");
   if (!btn) return;
   const action = btn.dataset.card;
-  const card = selected()?.card;
-  busy(btn, async () => {
+  withButton(btn, async () => {
     if (action === "issue" || action === "replace") {
       if (action === "replace" && !confirm("Cancel this card and issue a new number? The old card will stop working.")) return;
       state.revealedCard = await api(`/accounts/${state.selectedId}/cards`, { method: "POST", body: { replace: action === "replace" } });
       toast(action === "issue" ? "Issued a virtual card" : "Replaced the card. The old one is cancelled.");
     } else {
-      await api(`/cards/${card.id}/${action}`, { method: "POST" });
+      await api(`/cards/${selected().card.id}/${action}`, { method: "POST" });
       toast(action === "freeze" ? "Froze the card" : "Unfroze the card");
     }
     await refresh();
@@ -467,12 +532,11 @@ $("#form-purchase").addEventListener("input", (e) => {
 $("#form-purchase").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.currentTarget;
-  const card = selected()?.card;
-  if (!card) { toast("Issue a card before swiping.", "error"); return; }
-  busy(form.querySelector("[type=submit]"), async () => {
+  submitForm(form, async () => {
     const t = await api("/transactions", {
       method: "POST",
-      body: { merchant_name: form.merchant_name.value, mcc: form.mcc.value, amount: form.amount.value, card_id: card.id, idempotency_key: uuid() },
+      body: { merchant_name: form.merchant_name.value, mcc: form.mcc.value, amount: form.amount.value,
+              card_id: selected().card.id, idempotency_key: uuid() },
     });
     $("#slip-area").innerHTML = slipHtml(t);
     await refresh();
@@ -484,20 +548,22 @@ $("#form-race").addEventListener("change", () => updateContention());
 $("#contention").addEventListener("click", (e) => {
   const b = e.target.closest("#btn-make-race");
   if (!b) return;
-  const form = $("#form-race");
-  form.amounts.value = `${b.dataset.a}, ${b.dataset.b}`;
-  form.repeat.value = "1";
+  $("#form-race").amounts.value = `${b.dataset.a}, ${b.dataset.b}`;
+  $("#form-race").repeat.value = "1";
   updateContention();
 });
 
 $("#form-race").addEventListener("submit", (e) => {
   e.preventDefault();
-  const acct = selected();
-  if (!acct?.card) { toast("Issue a card before running a race.", "error"); return; }
   const form = e.currentTarget;
+  const acct = selected();
   const amounts = raceAmounts();
-  if (!amounts.length) { toast("Enter at least one amount, like 80, 50.", "error"); return; }
-  busy(form.querySelector("[type=submit]"), () => runRace(acct.id, acct.card.id, amounts, form.mcc.value));
+  submitForm(form, async () => {
+    if (!amounts.length || amounts.some((a) => !(toCents(a) > 0))) {
+      throw Object.assign(new Error("Enter amounts separated by commas, like 80, 50."), { field: "amounts" });
+    }
+    await runRace(acct.id, acct.card.id, amounts, form.mcc.value);
+  });
 });
 
 $("#activity-body").addEventListener("click", (e) => {
@@ -508,14 +574,14 @@ $("#activity-body").addEventListener("click", (e) => {
   renderLedger(state.selectedId).catch((err) => toast(err.message, "error"));
 });
 
-// ---------------------------------------------------------------- boot
+// ---------------------------------------------------------------- start
 
-(async function boot() {
+(async function start() {
   try {
     state.categories = await api("/merchant-categories");
     renderCategorySelect();
     await refresh();
   } catch (err) {
-    toast(`Can't reach the server: ${err.message}`, "error");
+    toast(err.message, "error");
   }
 })();

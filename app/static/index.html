@@ -23,7 +23,7 @@
         <select id="account-select"></select>
         <button class="btn quiet" id="btn-new-account" type="button">New account</button>
       </div>
-      <button class="btn race-cta" id="btn-scenario" type="button">Run the $100 race</button>
+      <button class="btn on-dark" id="btn-scenario" type="button">Run the $100 race</button>
     </div>
   </header>
 
@@ -106,14 +106,23 @@
       <section class="column wide" aria-labelledby="h-purchase">
         <h2 id="h-purchase">Swipe the card</h2>
         <div class="surface">
-          <div class="merchants" id="merchant-presets" role="group" aria-label="Example merchants"></div>
-          <form id="form-purchase" class="purchase-form">
+          <div class="gate" hidden>
+            <p>There's no card to swipe yet. Issue one and this unlocks.</p>
+            <button class="btn primary" data-action="issue" type="button">Issue virtual card</button>
+          </div>
+          <form id="form-purchase">
+            <fieldset>
+            <legend class="visually-hidden">Purchase details</legend>
+            <div class="merchants" id="merchant-presets" role="group" aria-label="Example merchants"></div>
+            <div class="purchase-form">
             <label class="field">Merchant<input name="merchant_name" required maxlength="100" autocomplete="off"></label>
             <label class="field">Category<select name="mcc" id="mcc-select"></select></label>
             <label class="field">Amount
               <span class="money"><span aria-hidden="true">$</span><input name="amount" inputmode="decimal" required placeholder="25.00" autocomplete="off"></span>
             </label>
             <button class="btn primary" type="submit">Swipe card</button>
+            </div>
+            </fieldset>
           </form>
           <div id="slip-area" class="slip-area">
             <p class="slip-empty">Swipe the card to see each check the purchase goes through.</p>
@@ -129,7 +138,13 @@
         <p class="meta">Every purchase below is sent at the same instant. The server lets one at a time hold the account's lock, so each sees the balance the previous one left.</p>
       </div>
       <div class="surface">
-        <form id="form-race" class="race-form">
+        <div class="gate" hidden>
+          <p>There's no card to swipe yet. Issue one and this unlocks.</p>
+          <button class="btn primary" data-action="issue" type="button">Issue virtual card</button>
+        </div>
+        <form id="form-race">
+          <fieldset class="race-form">
+          <legend class="visually-hidden">Race settings</legend>
           <label class="field">Amounts, separated by commas<input name="amounts" value="80, 50" autocomplete="off"></label>
           <label class="field">Send each<span class="suffix-input"><input name="repeat" type="number" min="1" max="50" value="1"><span>times</span></span></label>
           <label class="field">At
@@ -140,6 +155,7 @@
             </select>
           </label>
           <button class="btn primary" type="submit">Send all at once</button>
+          </fieldset>
         </form>
         <div id="contention" class="contention" aria-live="polite"></div>
         <div id="race-result"></div>

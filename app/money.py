@@ -1,46 +1,45 @@
-"""Money parsing and formatting. All amounts are integer cents internally."""
+"""Money is integer cents everywhere. This module is the only place dollars are parsed."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
 from .errors import ValidationError
 
-# A sanity ceiling for a single deposit or purchase in this simulation.
-MAX_AMOUNT_CENTS = 100_000_00
+MAX_AMOUNT_CENTS = 100_000_00   # sanity ceiling for one deposit or purchase
+MAX_DOLLARS = Decimal(MAX_AMOUNT_CENTS) / 100
 
 
 def parse_amount(value, field: str = "amount") -> int:
-    """Convert a dollar amount ("12.34", 12.34, or 12) to positive integer cents.
+    """Turn a dollar amount ("12.34", 12.34 or 12) into positive integer cents.
 
-    Rejects floats' binary noise by going through str -> Decimal, and rejects
-    sub-cent precision instead of silently rounding.
+    Goes through str -> Decimal so float noise never leaks in, and rejects
+    fractions of a cent instead of silently rounding them.
     """
-    if value is None or isinstance(value, bool):
-        raise ValidationError(f"{field} is required")
+    if value is None or isinstance(value, bool) or str(value).strip() == "":
+        raise ValidationError("Enter an amount, like 12.34.", field=field)
+    if len(str(value)) > 32:
+        raise ValidationError("Enter an amount, like 12.34.", field=field)
     try:
-        dec = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError):
-        raise ValidationError(f"{field} must be a number, e.g. 12.34")
-    if not dec.is_finite():
-        raise ValidationError(f"{field} must be a finite number")
-    if dec != dec.quantize(Decimal("0.01")):
-        raise ValidationError(f"{field} cannot have more than 2 decimal places")
-    cents = int(dec * 100)
-    if cents <= 0:
-        raise ValidationError(f"{field} must be greater than 0")
-    if cents > MAX_AMOUNT_CENTS:
-        raise ValidationError(f"{field} cannot exceed ${MAX_AMOUNT_CENTS // 100:,}")
-    return cents
-
-
-def fmt(cents: int) -> str:
-    """Integer-only formatting (no float division): 1234 -> "12.34"."""
-    sign = "-" if cents < 0 else ""
-    dollars, rem = divmod(abs(cents), 100)
-    return f"{sign}{dollars}.{rem:02d}"
+        dollars = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise ValidationError("Enter an amount, like 12.34.", field=field)
+    if not dollars.is_finite():
+        raise ValidationError("Enter an amount, like 12.34.", field=field)
+    # Bounds before any arithmetic: comparing works for any exponent, but
+    # multiplying or rounding a value like 1e999999999 overflows.
+    if dollars <= 0:
+        raise ValidationError("Amount must be more than $0.", field=field)
+    if dollars > MAX_DOLLARS:
+        raise ValidationError(f"Amount can't be more than {fmt_usd(MAX_AMOUNT_CENTS)}.", field=field)
+    # Safe now that 0 < dollars <= MAX_DOLLARS. (normalize() would underflow a
+    # value like 1e-999999999 to zero and let it through.)
+    if dollars != dollars.quantize(Decimal("0.01")):
+        raise ValidationError("Amount can't include fractions of a cent.", field=field)
+    return int(dollars * 100)
 
 
 def fmt_usd(cents: int) -> str:
+    """Integer-only formatting, no float division: 440000 -> "$4,400.00"."""
     sign = "-" if cents < 0 else ""
     dollars, rem = divmod(abs(cents), 100)
     return f"{sign}${dollars:,}.{rem:02d}"

@@ -17,17 +17,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 CONDITIONAL_DEBIT = '''            debited = conn.execute(
-                """UPDATE accounts SET balance_cents = balance_cents - ?
-                   WHERE id = ? AND balance_cents >= ?
-                   RETURNING balance_cents""",
-                (amount_cents, account["id"], amount_cents),
-            ).fetchall()'''
-READ_CHECK_WRITE = '''            if account["balance_cents"] < amount_cents:
-                debited = []
-            else:
-                debited = conn.execute(
-                    "UPDATE accounts SET balance_cents = ? WHERE id = ? RETURNING balance_cents",
-                    (account["balance_cents"] - amount_cents, account["id"])).fetchall()'''
+                "UPDATE accounts SET balance_cents = balance_cents - :amount "
+                "WHERE id = :account AND balance_cents >= :amount RETURNING balance_cents",
+                {"amount": request["amount_cents"], "account": card["account_id"]}).fetchall()'''
+READ_CHECK_WRITE = '''            debited = [] if balance < request["amount_cents"] else conn.execute(
+                "UPDATE accounts SET balance_cents = ? WHERE id = ? RETURNING balance_cents",
+                (balance - request["amount_cents"], card["account_id"])).fetchall()'''
 
 NO_LOCK = [('conn.execute("BEGIN IMMEDIATE")', "pass"),
            ('conn.execute("ROLLBACK")', "pass"),
@@ -38,10 +33,10 @@ NAIVE_DEBIT = [(CONDITIONAL_DEBIT, READ_CHECK_WRITE)]
 MUTATIONS = [
     # (name, {file: [(old, new), ...]}, expected_to_be_safe)
     ("baseline (no mutation)", {}, True),
-    ("lock only: BEGIN IMMEDIATE + read-check-write in Python", {"app/services.py": NAIVE_DEBIT}, True),
+    ("lock only: BEGIN IMMEDIATE + read-check-write in Python", {"app/purchases.py": NAIVE_DEBIT}, True),
     ("BEGIN (deferred) instead of BEGIN IMMEDIATE", {"app/db.py": DEFERRED}, False),
     ("atomic UPDATE only: no transaction lock", {"app/db.py": NO_LOCK}, False),
-    ("naive: no lock + read-check-write", {"app/db.py": NO_LOCK, "app/services.py": NAIVE_DEBIT}, False),
+    ("naive: no lock + read-check-write", {"app/db.py": NO_LOCK, "app/purchases.py": NAIVE_DEBIT}, False),
 ]
 
 
