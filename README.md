@@ -17,7 +17,7 @@ Documentation: [architecture.md](architecture.md) · [ai-usage.md](ai-usage.md) 
 ## Run locally
 
 ```bash
-git clone <this repo>
+git clone https://github.com/racheltcp/hsa-platform
 cd hsa-platform
 
 python3 -m venv .venv
