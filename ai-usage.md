@@ -2,167 +2,139 @@
 
 I used Claude heavily while building this project. It generated most of the initial implementation, tests, and documentation.
 
-Since AI use was expected for the assignment, the part I spent the most time on was figuring out what I could actually trust.
+Since AI use was expected for the assignment, I did not try to minimize how much I used it. What mattered more to me was whether I actually understood the important parts of what it generated and whether I had evidence that the system behaved the way I was claiming.
 
-The main thing I kept checking was whether the evidence actually matched what the project was claiming.
+That became the main way I reviewed the project. If something passed, I wanted to know what the test was actually checking. If the UI showed a concurrency state, I wanted to know whether that matched what the backend was doing. If an invalid request returned an error, I also wanted to know whether it had changed any state before failing.
 
-It was not enough for the project to work only in Claude's environment. A green test suite was not enough if the tests never exercised the failure case. A concurrency demo was not useful if the visualization did not match what the backend was actually doing. And an error response was not enough if the rejected request could still leave the database in the wrong state.
+## What Claude helped with
 
-That was how I approached the rest of the review.
+Claude generated most of the initial Flask API, SQLite schema and persistence layer, account and contribution flows, virtual card behavior, purchase authorization, merchant eligibility logic, idempotency handling, concurrency handling, frontend, automated tests, and the first versions of the README and architecture documentation.
 
-## Running it outside Claude's environment
+It also proposed several of the design choices that remained in the final version, including storing money as integer cents, using idempotency keys, wrapping write workflows in `BEGIN IMMEDIATE`, using a conditional balance update for purchases, and adding concurrency tests.
 
-One of the first problems showed up when I tried to run the project on my Mac.
+I did not personally come up with all of those choices, so I did not want to present them as if I had. My goal during review was to understand why they were there, where they were actually useful, and where the implementation or explanation still needed work.
 
-Claude had tested it using a newer Python version, while I was using Python 3.9.6. The app crashed because some of the generated type syntax was not compatible with my environment.
+## Running the project outside Claude's environment
 
-I did not diagnose that compatibility issue myself, but I surfaced it by actually running the project outside Claude's environment. I sent the failure back, applied the fix, and ran it again locally.
+One of the first useful checks was simply running the project on my own machine.
 
-That was an early example of why I did not want the environment that generated the code to be the only environment verifying it.
+Claude had been working in a newer Python environment, while my Mac was using Python 3.9.6. The application crashed because some of the generated type-annotation syntax was not compatible with that version.
 
-## Understanding the system
+I did not diagnose the compatibility issue myself. I found it by running the application locally, sent the failure back to Claude, applied the compatibility changes, and tried again.
 
-I also did not want to treat the generated implementation as a black box.
+That changed how I approached the rest of the project. I did not want Claude's own environment to be the only place verifying code that Claude had generated.
 
-The project is a Flask application backed by SQLite. The main pieces are separated by responsibility: accounts and contributions, cards, purchases, database and transaction handling, merchant eligibility, money parsing, and the HTTP layer.
+It also made me pay more attention to the difference between "this worked once" and "I have checked the thing I am actually relying on."
 
-I went through those pieces so I could follow an operation from the HTTP request to the state that was actually persisted.
+## Challenging a passing test suite
 
-Accounts hold the current balance and identify the owner. Contributions are stored as individual records instead of only keeping an accumulated number, so the history behind the annual total is still available.
+At one point the project already had 42 passing tests.
 
-Cards are separate because they have their own lifecycle. A card can be active, frozen, cancelled, or replaced without replacing the account.
+Instead of asking Claude to keep adding features, I asked for another review with a different goal. One of the prompts I gave was essentially:
 
-Purchase attempts are persisted even when they are declined. No money moves on a decline, but the authorization still happened. Keeping it means the activity history can show what was attempted and why it stopped.
+> Don't assume the code is correct just because the existing tests pass. Review transaction correctness, concurrency, idempotency, database consistency, and whether the tests actually support the claims we are making.
 
-Money is stored as integer cents instead of floating-point dollars so financial calculations do not depend on binary floating-point behavior.
+I was less interested in increasing the number of tests than in whether the existing tests would notice if an important protection were broken.
 
-I also spent time understanding the idempotency path.
+That review found several problems I had not found myself. I do not want to take credit for the individual discoveries. What I did do was push for the implementation to be challenged instead of simply validated, work through the results, and rerun the project after changes.
 
-A timeout does not tell the caller whether the operation happened. The server might have completed it and the response might simply have been lost.
+The concurrency path was the part I spent the most time trying to understand afterward.
 
-Without idempotency, retrying that request could create a second purchase or contribution. The key gives the application a way to recognize that it has already handled the same logical operation.
+The easiest example is an account with $100 and two purchases arriving around the same time, one for $80 and one for $50. If both requests independently read the original $100 and then make their decisions from that same state, they could both think there is enough money even though the account cannot cover $130.
 
-## Representative workflows
+For purchases, the implementation has a conditional balance update. The debit succeeds only if enough money is still available when the update executes.
 
-### 1. Challenging the implementation after the tests were already passing
+That protects the individual debit, but I initially did not understand why that was not enough by itself.
 
-At one point the project had 42 passing tests.
+The contribution path made the difference clearer to me. A contribution has to read how much has already been contributed, compare that total with the annual limit, decide whether another contribution is allowed, and then write the result.
 
-I specifically told Claude not to assume that the code was correct just because the existing tests passed. I asked it to take another look at transaction correctness, concurrency, idempotency, database consistency, and whether the tests actually supported the claims we were making about the system.
+If another request can change the database between those steps, every SQL statement can be valid by itself while the overall decision is still based on stale information.
 
-A test can be green without ever reaching the failure case that matters.
+That is where `BEGIN IMMEDIATE` matters. It starts the SQLite write transaction before the application enters that read-decide-write sequence, so another writer cannot change the database in the middle of the decision.
 
-That deeper review found several problems I had not found myself. I do not want to take credit for those individual discoveries.
+I now think of the transaction and the conditional debit as related protections that solve different problems. The conditional update protects an individual balance change. The transaction protects a larger decision that depends on state that was read earlier.
 
-What I did do was ask for the implementation to be challenged instead of simply validated, work through what came back, and rerun the project and tests instead of treating the fix as the end of the investigation.
+## Where Claude's explanation was incomplete
 
-### 2. Making the concurrency demo match the backend
+One of the concurrency explanations was too broad about what the conditional purchase update could protect.
 
-I also pushed on the concurrency visualization because I wanted it to represent what the backend was actually doing.
+It made the atomic balance update sound closer to a replacement for the transaction lock than it really was.
 
-I asked Claude to distinguish between a request waiting for the database lock, actually holding the lock, and reaching its final approved or declined result.
+The mutation testing helped expose that difference.
 
-Those are different states. A request can be waiting without owning the lock yet, and its eventual transaction result is separate again.
+When the transaction protection was weakened, the purchase path still had protection against directly overdrawing a balance because of the conditional update. But other workflows that depended on reading state before making a decision were no longer protected in the same way.
 
-I explicitly told Claude not to prioritize visual appearance over accurately representing the concurrency behavior.
+The contribution path was the clearest example. Multiple requests could each make a decision using an outdated contribution total and collectively violate the annual limit.
 
-I used the visualization as a way to understand the system, but not as proof that the locking was correct. I still went back through the backend code and tests.
+That made me go back and revise how I understood the design. The conditional update is useful defense for purchases, but it does not replace transaction-level protection for every invariant in the application.
 
-### 3. Final review before submission
+I also made sure the documentation did not describe those two safeguards as if they were interchangeable.
 
-Near the end, I asked Claude to review the project again rather than adding more features.
+## Checking whether the tests notice when protections disappear
+
+Claude had already created a mutation-checking script, so mutation testing itself was not my idea.
+
+What I found useful was the question it let me ask. Instead of only running the correct implementation and seeing green tests, the script intentionally weakens specific concurrency protections and checks whether the tests stop passing.
+
+I ran the mutation check locally.
+
+The intentionally unsafe versions did not always fail in exactly the same way or with the exact same number of failures on my Mac as they had in Claude's environment. That made sense to me because thread scheduling is timing-dependent.
+
+I was not trying to reproduce an exact failure count. What mattered was whether removing an important protection caused the relevant tests to detect a problem.
+
+I also would not treat the mutation check as proof that the concurrency implementation is perfect. It shows that the test suite is sensitive to several specific unsafe alternatives. There could still be failure modes those mutations do not represent.
+
+That distinction mattered to me because I did not want the documentation or demo to claim more than the evidence actually showed.
+
+## Reviewing state-changing behavior before submission
+
+Near the end, I asked Claude for another review rather than adding more features.
 
 I wanted that pass to focus on correctness risks, documentation accuracy, TODOs, unused or debugging code, and anything important that I should understand before submitting.
 
-That final review led to one more API change and another regression test.
+During that review, another issue came up in the card-issuance endpoint.
 
-## Understanding the concurrency path
+The endpoint was converting the incoming `replace` value using Python's `bool()` behavior. A non-empty string is truthy in Python, so a value like `"false"` could still be interpreted as true.
 
-Claude chose the original locking strategy, including `BEGIN IMMEDIATE` and the conditional balance update.
+The part that mattered to me was not just that the input type was technically wrong. This endpoint can cancel a customer's active card and issue a replacement.
 
-I went back through that part of the code because I wanted to understand what each protection was actually doing.
+I changed the route so `replace` must be an actual JSON boolean. If the field is missing, it defaults to `false`. If the caller sends a string instead, the request returns `422`.
 
-The simplest race is an account with $100 and two purchases arriving around the same time, one for $80 and one for $50.
+I also added a regression test.
 
-If both requests read the original $100 and make their decisions independently, both could approve even though the account cannot cover $130.
+I did not want that test to stop at checking the HTTP status code. A `422` would not be enough if the request had already changed the customer's card before failing.
 
-For a purchase, the balance update is conditional. The debit only succeeds if enough money is still available when the update executes. That protects the individual balance change.
+After sending the invalid request, the test fetches the account again and verifies that the original card is still active. It then sends an actual JSON `true` and checks that a valid replacement still works.
 
-The contribution path helped me understand why an atomic update is not enough for every invariant.
+For me, that was a better test because it checks the state I actually care about protecting.
 
-That operation has to read how much has already been contributed, decide whether another contribution is allowed, and then write it.
-
-If another writer can change the state between those steps, every SQL statement could be valid on its own while the overall decision is still based on stale information.
-
-My understanding of `BEGIN IMMEDIATE` is that SQLite starts the write transaction before that read-decide-write sequence begins, so another writer cannot change the database in the middle of the decision.
-
-I think of that transaction and the conditional balance update as related protections, but not identical ones. The conditional update protects an individual debit. The transaction protects a larger decision that depends on state that was read earlier.
-
-There is also a tradeoff.
-
-SQLite's writer lock is broad, so unrelated accounts can still block one another. For this project, that keeps the concurrency model relatively simple to inspect. At a larger scale on something like Postgres, I would want to investigate more targeted locking, such as row-level locks, instead of assuming this design should carry over unchanged.
-
-## Checking whether the tests notice when protection disappears
-
-I also ran the concurrency mutation check myself.
-
-Claude had already created the mutation testing, so that was not my idea.
-
-What I found useful about it was that it changed the question.
-
-Instead of only asking whether the final implementation passes, it deliberately weakens specific concurrency protections and asks whether the tests notice.
-
-When I ran it locally, the intentionally naive concurrency version did not fail exactly the same number of tests on my Mac as it did in Claude's environment.
-
-That made sense because thread scheduling is timing-dependent.
-
-I was not trying to reproduce an exact failure count. The result I cared about was that weakening the protections caused the relevant tests to stop passing.
-
-I also would not call that proof that the implementation is correct. It is evidence that the suite detects several specific unsafe alternatives. There could still be failure modes those mutations do not represent.
-
-## A final API change
-
-During final review, Claude pointed out another issue in the card-issuance route.
-
-The endpoint was converting the incoming `replace` value with Python's `bool()` function.
-
-After Claude pointed it out, I went through the behavior and confirmed that a non-empty string is treated as `True` in Python, even when the text inside that string says false.
-
-For this endpoint, that has a real consequence. If a client sends false as a string instead of an actual JSON boolean, the server could interpret it as permission to cancel the customer's current card and issue a replacement.
-
-I did not want the server guessing in a path with that kind of side effect.
-
-I changed the route in my local repository so `replace` only accepts an actual JSON boolean. If the field is missing, it defaults to `false`. If the caller sends a string instead of a real boolean, the request now returns `422`.
-
-I also added the regression test.
-
-I did not stop at checking the status code.
-
-After sending the invalid request, the test fetches the account again and checks that the original card is still active. It then sends an actual JSON `true` and verifies that valid replacement still works.
-
-The important part was making sure the rejected request could not change the customer's card.
-
-After the change, I reran the full test suite and mutation check locally.
-
-## Making sure the UI did not overstate the backend
+## Making sure the UI matched the backend
 
 I pushed back on the generated UI several times too.
 
-The first dashboard technically worked, but it still looked like separate white boxes instead of one account. I wanted the balance, contributions, card, and activity to feel connected.
+The first dashboard worked, but I thought it still felt like a collection of separate boxes rather than one account. I wanted the balance, contributions, card, and activity to feel connected.
 
-The concurrency visualization was the part where I cared most about accuracy.
+The concurrency visualization was where I cared more about accuracy than appearance.
 
-I specifically asked for it to distinguish between a request waiting for the lock, actually holding the lock, and its final approved or declined result.
+I asked Claude to distinguish between a request waiting for the database lock, a request actually holding the lock, and the final approved or declined result. Those are not the same state.
 
-Those are different states. A request can be waiting without owning the lock yet, and its eventual transaction result is separate again.
+I specifically asked Claude not to make the visualization cleaner at the cost of making the concurrency behavior less accurate.
 
-I explicitly told Claude not to prioritize visual appearance over accurately representing the concurrency behavior.
+That feedback led to another issue being found in how the timeline represented those states. Claude found the specific implementation problem, but I kept pushing on that area because I did not want the demo to visually claim something that the backend was not actually doing.
 
-That feedback led to another problem being found in how the timeline represented those states. Claude found the specific implementation issue, but the reason I kept pushing on it was that I did not want the demo to visually claim behavior that the backend was not actually providing.
+I also tested parts of the UI myself in the browser. For example, after the date-of-birth validation changed, I checked that the error appeared directly below the field and cleared after the date changed.
 
-I also tested the UI directly in my browser.
+## Understanding idempotency
 
-One example was the date-of-birth validation. After that interaction changed, I checked that the error appeared below the field and cleared after the date changed.
+I also went back through the idempotency path because it was easy to see the code without immediately understanding the customer problem it was solving.
+
+A timeout does not tell a caller whether an operation happened. The server may have completed a purchase or contribution and the response may simply have been lost.
+
+Without idempotency, retrying that request could create a second transaction even though the caller only intended one.
+
+The idempotency key gives the application a way to recognize that it has already handled that logical operation and return the earlier result instead of performing it again.
+
+That is the kind of behavior I would care about even more in a real financial system because a retry should not become a second charge or contribution.
 
 ## How I verified the final implementation
 
@@ -180,44 +152,28 @@ I also ran:
 python scripts/mutation_check.py
 ```
 
-The mutation check deliberately weakens different concurrency protections and runs the tests against those versions.
+The baseline implementation and the normal `BEGIN IMMEDIATE` implementation passed. Changing the transaction to deferred locking caused the tests to fail. Removing the transaction lock and relying only on the atomic update also caused tests to fail, and the naive read-check-write implementation failed as well.
 
-The final output showed the expected behavior:
-
-- the baseline implementation passed
-- the `BEGIN IMMEDIATE` version passed
-- changing it to a deferred transaction caused the tests to fail
-- removing the transaction lock and relying only on the atomic update caused the tests to fail
-- the naive read-check-write implementation caused the tests to fail
-
-I do not consider that proof that the project has no possible concurrency bugs.
-
-It gives me evidence that the tests are sensitive to these specific unsafe implementations, which is more useful than only knowing that the final implementation passes.
+I do not see that as proof that no concurrency bug exists. I see it as evidence that the tests detect those particular broken versions.
 
 I also ran the application locally and exercised the main flows in the browser, including purchases and the concurrency race.
 
-I checked that the race visualization matched the states it was supposed to represent rather than treating the UI as a separate demonstration disconnected from the backend.
+Before submitting, I reran the full suite and mutation check after the final API change.
 
-## Production considerations
+## What I would revisit before production
 
 I would not call this production-ready just because the take-home works.
 
-The HSA rules are simplified. In a real financial product, I would want the actual regulatory requirements and edge cases reviewed with people who know that domain before treating my assumptions as authoritative.
+The first area I would revisit is the HSA domain itself. The application intentionally uses simplified HSA rules. I can test whether the software follows the rules we implemented, but I would not want to independently decide that those rules are complete or correct for a real financial product.
 
-I would also revisit the SQLite locking strategy at production scale rather than assuming the same approach should carry over unchanged.
+That is an area where I would want someone with deeper HSA, compliance, or regulatory knowledge involved before treating the assumptions as production requirements.
 
-The tests and mutation check give me evidence for the cases they cover, but in production I would still want observability around retries, lock contention, unexpected declines, and failures that are difficult to reproduce locally.
+I see the database and locking strategy a little differently.
 
-Those are areas where I would want more context before making a production decision.
+SQLite's writer lock is broad, so unrelated accounts can block one another. For this project, that makes the concurrency model relatively simple to inspect.
 
-## Final review
+At a larger scale, I would investigate a database such as Postgres and more targeted locking, including row-level locking. I would first want to understand the tradeoffs and failure modes myself, then bring options to the team rather than assuming the SQLite design should carry over unchanged.
 
-Before submitting, I reran the full test suite and mutation check and went back through the parts of the code I thought carried the most risk.
+I would also want better production observability around retries, lock contention, unexpected declines, and failures that are difficult to reproduce locally.
 
-The areas I paid the most attention to were concurrency, idempotency, input validation, and whether the tests were actually checking the state the application claimed to protect.
-
-I also made sure I could follow the important paths through the code and explain what each protection was doing instead of only knowing that the generated implementation passed its tests.
-
-There are still things I would revisit in a production system, especially the simplified HSA rules, SQLite locking at a larger scale, and production observability around retries and lock contention.
-
-Before submitting, I wanted to make sure I could explain why the protections were there, what the tests were actually checking, and what I'd still want to look into before production.
+Before submitting, I wanted to make sure I could explain why the important protections were there, what the tests were actually checking, and which parts I would still want more information or expertise on before making a production decision.
