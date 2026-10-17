@@ -220,4 +220,4 @@ I also made sure I could follow the important paths through the code and explain
 
 There are still things I would revisit in a production system, especially the simplified HSA rules, SQLite locking at a larger scale, and production observability around retries and lock contention.
 
-Before submitting, I wanted to be able to explain why the important protections were there, what the tests actually covered, and what I would still want to investigate before production.
+Before submitting, I wanted to make sure I could explain why the protections were there, what the tests were actually checking, and what I'd still want to look into before production.
