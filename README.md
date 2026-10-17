@@ -380,4 +380,3 @@ See [ai-usage.md](ai-usage.md) for how I reviewed the generated implementation, 
 
 Video: https://drive.google.com/file/d/1F3A-BKOTk8_-cuIIecCchVJG76V4Yd9Q/view?usp=sharing
 
-The recording outline is in [docs/demo-video-outline.md](docs/demo-video-outline.md).
