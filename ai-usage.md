@@ -170,3 +170,54 @@ I ran the full test suite locally on my Mac:
 
 ```bash
 python -m unittest discover -s tests -t . -v
+```
+
+The final suite has **49 passing tests**.
+
+I also ran:
+
+```bash
+python scripts/mutation_check.py
+```
+
+The mutation check deliberately weakens different concurrency protections and runs the tests against those versions.
+
+The final output showed the expected behavior:
+
+- the baseline implementation passed
+- the `BEGIN IMMEDIATE` version passed
+- changing it to a deferred transaction caused the tests to fail
+- removing the transaction lock and relying only on the atomic update caused the tests to fail
+- the naive read-check-write implementation caused the tests to fail
+
+I do not consider that proof that the project has no possible concurrency bugs.
+
+It gives me evidence that the tests are sensitive to these specific unsafe implementations, which is more useful than only knowing that the final implementation passes.
+
+I also ran the application locally and exercised the main flows in the browser, including purchases and the concurrency race.
+
+I checked that the race visualization matched the states it was supposed to represent rather than treating the UI as a separate demonstration disconnected from the backend.
+
+## Production considerations
+
+I would not call this production-ready just because the take-home works.
+
+The HSA rules are simplified. In a real financial product, I would want the actual regulatory requirements and edge cases reviewed with people who know that domain before treating my assumptions as authoritative.
+
+I would also revisit the SQLite locking strategy at production scale rather than assuming the same approach should carry over unchanged.
+
+The tests and mutation check give me evidence for the cases they cover, but in production I would still want observability around retries, lock contention, unexpected declines, and failures that are difficult to reproduce locally.
+
+Those are areas where I would want more context before making a production decision.
+
+## Final review
+
+Before submitting, I reran the full test suite and mutation check and went back through the parts of the code I thought carried the most risk.
+
+The areas I paid the most attention to were concurrency, idempotency, input validation, and whether the tests were actually checking the state the application claimed to protect.
+
+I also made sure I could follow the important paths through the code and explain what each protection was doing instead of only knowing that the generated implementation passed its tests.
+
+There are still things I would revisit in a production system, especially the simplified HSA rules, SQLite locking at a larger scale, and production observability around retries and lock contention.
+
+Before submitting, I wanted to be able to explain why the important protections were there, what the tests actually covered, and what I would still want to investigate before production.
