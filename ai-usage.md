@@ -2,9 +2,9 @@
 
 I used Claude heavily while building this project. It generated most of the initial implementation, tests, and documentation.
 
-Since AI use was expected for the assignment, I did not try to minimize how much I used it. What mattered more to me was whether I actually understood the important parts of what it generated and whether I had evidence that the system behaved the way I was claiming.
+Since AI use was expected for the assignment, I did not try to minimize how much I used it. What mattered more to me was whether I understood the important parts of what it generated and whether I had evidence that the system behaved the way I was claiming.
 
-That became the main way I reviewed the project. If something passed, I wanted to know what the test was actually checking. If the UI showed a concurrency state, I wanted to know whether that matched what the backend was doing. If an invalid request returned an error, I also wanted to know whether it had changed any state before failing.
+That became the main way I reviewed the project. If something passed, I wanted to know what the test was checking. If the UI showed a concurrency state, I wanted to know whether that matched what the backend was doing. If an invalid request returned an error, I also wanted to know whether it had changed any state before failing.
 
 ## What Claude helped with
 
@@ -24,7 +24,7 @@ I did not diagnose the compatibility issue myself. I found it by running the app
 
 That changed how I approached the rest of the project. I did not want Claude's own environment to be the only place verifying code that Claude had generated.
 
-It also made me pay more attention to the difference between "this worked once" and "I have checked the thing I am actually relying on."
+It also made me pay more attention to the difference between "this worked once" and "I have checked the thing I am relying on."
 
 ## Challenging a passing test suite
 
@@ -106,7 +106,7 @@ I did not want that test to stop at checking the HTTP status code. A `422` would
 
 After sending the invalid request, the test fetches the account again and verifies that the original card is still active. It then sends an actual JSON `true` and checks that a valid replacement still works.
 
-For me, that was a better test because it checks the state I actually care about protecting.
+That was a better test because it checks the state I care about protecting.
 
 ## Making sure the UI matched the backend
 
@@ -116,11 +116,11 @@ The first dashboard worked, but I thought it still felt like a collection of sep
 
 The concurrency visualization was where I cared more about accuracy than appearance.
 
-I asked Claude to distinguish between a request waiting for the database lock, a request actually holding the lock, and the final approved or declined result. Those are not the same state.
+I asked Claude to distinguish between a request waiting for the database lock, a request holding the lock, and the final approved or declined result. Those are not the same state.
 
 I specifically asked Claude not to make the visualization cleaner at the cost of making the concurrency behavior less accurate.
 
-That feedback led to another issue being found in how the timeline represented those states. Claude found the specific implementation problem, but I kept pushing on that area because I did not want the demo to visually claim something that the backend was not actually doing.
+That feedback led to another issue being found in how the timeline represented those states. Claude found the specific implementation problem, but I kept pushing on that area because I did not want the demo to visually claim something that the backend was not doing.
 
 I also tested parts of the UI myself in the browser. For example, after the date-of-birth validation changed, I checked that the error appeared directly below the field and cleared after the date changed.
 
