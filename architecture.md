@@ -43,7 +43,7 @@ sequenceDiagram
     C->>A: POST /api/transactions {card_id, amount, merchant_name, mcc, idempotency_key}
     A->>P: authorize_purchase(conn, body)
     P->>P: validate input, dollars to integer cents
-    P->>D: BEGIN IMMEDIATE (take the write lock; other writers wait here)
+    P->>D: BEGIN IMMEDIATE (take the write lock, other writers wait here)
     P->>D: SELECT by (card_id, idempotency_key)
     alt seen before
         P->>P: same amount, merchant and MCC? else 409
