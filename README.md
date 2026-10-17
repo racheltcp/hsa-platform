@@ -61,28 +61,26 @@ Which purchase wins can vary with scheduling. Either outcome is correct as long 
 
 Other useful paths to try:
 
-1. Create an account and enter a future date of birth or duplicate email to see field-level validation.
+1. Create an account and enter a future date of birth or duplicate email to see validation.
 2. Add contributions and try to exceed the annual limit represented by the simulator.
-3. Issue a virtual card, freeze it, make a purchase, and then unfreeze it.
-4. Make purchases from eligible and ineligible merchant categories. The result shows which checks ran and why the request was approved or declined.
-5. Run a configurable race, for example twenty `$10` purchases against a `$100` balance. Exactly ten should be approved.
-6. Open **Activity** to see contributions, approved purchases, declined attempts, and their decision traces.
+3. Issue a card, freeze it, attempt a purchase, and then unfreeze it.
+4. Try eligible and ineligible merchant categories and inspect the decision trace.
+5. Run a configurable race, such as twenty `$10` purchases against a `$100` balance.
+6. Open **Activity** to see contributions, approved purchases, declined attempts, and their reasons.
 
 ---
 
-## Design and data model
+## Key design choices
+
+### Persisted state
 
 The project uses SQLite rather than keeping application state only in memory.
 
-That gives concurrent requests a shared source of truth, keeps state across process restarts, and provides real transaction semantics while keeping the persistence layer small enough to inspect directly.
+The main persisted concepts are accounts, contributions, cards, and purchase attempts. This gives concurrent requests a shared source of truth and keeps state across process restarts.
 
-The main persisted concepts are accounts, contributions, cards, and purchase attempts.
+### Money
 
-### Accounts
-
-An account contains the current balance and identifies the HSA owner.
-
-Money is represented as **integer cents** rather than floating-point dollars.
+Money is stored as integer cents instead of floating-point dollars.
 
 For example:
 
@@ -90,63 +88,39 @@ For example:
 $12.34 -> 1234
 ```
 
-Using integer cents avoids relying on binary floating-point behavior for financial calculations.
+This avoids relying on binary floating-point behavior for financial calculations.
 
 ### Contributions
 
-Contributions are stored as individual records instead of only maintaining one accumulated total.
+Contributions are stored as individual records rather than only maintaining one accumulated total.
 
-That preserves the history behind the current contribution amount and gives the annual-limit check persisted state to evaluate.
+That preserves the history behind the annual total and gives the contribution-limit check persisted state to evaluate.
 
-The contribution rules in this simulator are intentionally simplified.
+The contribution rules used here are intentionally simplified.
 
 ### Cards
 
-Cards are modeled separately from accounts because they have their own lifecycle.
+Cards are separate from accounts because they have their own lifecycle.
 
 A card can be active, frozen, cancelled, or replaced without replacing the account itself.
 
-The card-issuance endpoint validates `replace` as an actual JSON boolean.
-
-Valid:
-
-```json
-{"replace": true}
-```
-
-Rejected:
-
-```json
-{"replace": "false"}
-```
-
-This distinction matters because a non-empty string is truthy in Python:
-
-```python
-bool("false") == True
-```
-
-Silently coercing that input could turn a malformed request into an unintended card replacement.
-
 ### Purchase attempts
 
-Approved and declined purchase attempts are persisted.
+Approved and declined purchase attempts are both persisted.
 
-A declined purchase does not move money, but it is still a decision the system made. Keeping the attempt allows the activity history to show what was attempted and why it stopped.
+A decline does not move money, but the authorization still happened. Keeping the attempt lets the activity history show what was tried and why it stopped.
 
 ### Idempotency
 
 Operations that may be retried support idempotency keys.
 
-A timeout does not necessarily mean the original operation failed. The operation may have completed while the response was lost.
-
-Recognizing the same logical request prevents that ambiguity from becoming a duplicate purchase or contribution.
+A timeout does not necessarily mean an operation failed. The server may have completed it while the response was lost. Recognizing the same logical request prevents a retry from becoming a duplicate purchase or contribution.
 
 ---
 
 ## Concurrency and correctness
 
-The main concurrency failure this implementation protects against is making a decision using stale state.
+The main concurrency problem this implementation protects against is making a decision using stale state.
 
 Suppose an account has `$100`:
 
@@ -155,7 +129,7 @@ Request A reads $100 and wants to spend $80
 Request B reads $100 and wants to spend $50
 ```
 
-If both requests approve based on the same original balance, the system could approve `$130` against a `$100` account.
+If both requests approve using the same original balance, the system could approve `$130` against a `$100` account.
 
 ### `BEGIN IMMEDIATE`
 
@@ -165,9 +139,9 @@ Write workflows whose decisions depend on existing database state use:
 BEGIN IMMEDIATE
 ```
 
-This starts the SQLite write transaction before the application performs its read-decide-write sequence, so another writer cannot change the database in the middle of that decision.
+This starts the SQLite write transaction before the application performs its read-decide-write sequence, preventing another writer from changing the database in the middle of that decision.
 
-The contribution-limit flow is an example:
+The contribution-limit flow is a good example:
 
 ```text
 read existing contributions
@@ -175,63 +149,41 @@ read existing contributions
 -> write the contribution
 ```
 
-Protecting only the final SQL statement would not protect the earlier decision if another request could change the underlying state between those steps.
+Protecting only the final SQL statement would not protect the earlier decision if another request changed the state between those steps.
 
 ### Conditional balance update
 
 Purchases also use a conditional balance update.
 
-The debit only succeeds if enough balance is still available when the update executes.
+The debit succeeds only if enough balance is still available when the update executes.
 
-The transaction and conditional update therefore protect different parts of the operation. The transaction protects the larger decision based on previously read state, while the conditional update protects the individual debit.
+The transaction and the conditional update protect different parts of the operation. The transaction protects a larger decision based on previously read state. The conditional update protects the individual debit.
 
 ### Tradeoff
 
-SQLite's writer lock is broad, so unrelated write operations can still block one another.
+SQLite's writer lock is broad, so unrelated writes can still block one another.
 
-For this take-home, that keeps the persistence and transaction model simple enough to inspect directly.
+For this project, that keeps the concurrency model small enough to inspect directly. For a larger production service, I would evaluate a database such as Postgres and more targeted concurrency control, including row-level locking.
 
-For a larger production service using a database such as Postgres, more targeted concurrency control such as row-level locking would be worth evaluating rather than carrying the SQLite approach over unchanged.
-
-See [architecture.md](architecture.md) for more detail.
-
----
-
-## API validation
-
-The API rejects invalid representations instead of silently guessing what the caller intended.
-
-One example is the `replace` value when issuing a card.
-
-The initial implementation passed the value through Python's `bool()` function, which means:
-
-```python
-bool("false")   # True
-```
-
-That could turn malformed input into a destructive state change by replacing an active card.
-
-The endpoint now accepts only an actual JSON boolean. Invalid values return `422`.
-
-The regression test checks more than the response status. After the rejected request, it fetches the account again and verifies that the original card is still active. It then verifies that an actual JSON `true` still performs a valid replacement.
+See [architecture.md](architecture.md) for the full request flow, data model, and concurrency design.
 
 ---
 
 ## Verification
 
-For the higher-risk paths, the goal of the tests is not only to exercise an endpoint. I want them to check the state or invariant the application is claiming to protect.
+For higher-risk paths, the tests check the resulting state and invariants, not only the HTTP response.
 
-The card-replacement test is one example. A `422` response alone would not tell me whether the existing card had already been changed, so the test reads the account afterward and verifies that the original card is still active.
+For example, the card-replacement regression test does not stop at checking that invalid input returns `422`. It fetches the account afterward and verifies that the original card is still active.
 
-The concurrency tests take the same approach. They check the resulting account state under competing requests rather than assuming that starting multiple threads is enough to prove the behavior is safe.
+The concurrency tests use the same idea. They check the resulting account state under competing requests rather than assuming that starting multiple threads is enough to prove the behavior is safe.
 
-Run the complete suite with:
+Run the full suite with:
 
 ```bash
 python -m unittest discover -s tests -t . -v
 ```
 
-The suite covers business rules, HTTP behavior, validation, persistence, idempotency, database behavior, and concurrent requests.
+The final suite has **49 passing tests** covering business rules, HTTP behavior, validation, persistence, idempotency, database behavior, and concurrent requests.
 
 ### Concurrency mutation check
 
@@ -246,22 +198,20 @@ The mutation script copies the project to a temporary directory and deliberately
 A successful run looks like:
 
 ```text
-[ok] baseline (no mutation)                                     -> tests pass
-[ok] lock only: BEGIN IMMEDIATE + read-check-write in Python    -> tests pass
-[ok] BEGIN (deferred) instead of BEGIN IMMEDIATE                -> tests FAIL
-[ok] atomic UPDATE only: no transaction lock                    -> tests FAIL
-[ok] naive: no lock + read-check-write                          -> tests FAIL
+[ok] baseline (no mutation)                                  -> tests pass
+[ok] lock only: BEGIN IMMEDIATE + read-check-write in Python -> tests pass
+[ok] BEGIN (deferred) instead of BEGIN IMMEDIATE             -> tests FAIL
+[ok] atomic UPDATE only: no transaction lock                 -> tests FAIL
+[ok] naive: no lock + read-check-write                       -> tests FAIL
 ```
 
-This is not intended as proof that every possible concurrency failure is covered.
+This is not proof that every possible concurrency bug is covered. It is evidence that the suite detects several specific unsafe implementations.
 
-It provides evidence that the test suite is sensitive to several specific unsafe implementations rather than only passing against the final version.
-
-Because these tests use real thread scheduling, the exact number of individual failures may vary between environments. The important result is that the intentionally unsafe variants are detected.
+Because the tests use real thread scheduling, the exact number of individual failures can vary between environments.
 
 ### Optional browser walkthrough
 
-There is also an optional end-to-end browser walkthrough using Playwright:
+There is also an optional Playwright walkthrough:
 
 ```bash
 pip install playwright
@@ -312,14 +262,14 @@ If `replace` is supplied, it must be an actual JSON boolean.
 
 ### Status codes
 
-**200** - Successful request or idempotent replay  
-**201** - A resource or purchase attempt was created  
-**400** - Request body is not valid JSON  
-**404** - Account or card does not exist  
-**409** - Request conflicts with current state  
-**422** - Invalid input  
-**503** - Database is temporarily busy and the request may be retried  
-**500** - Unexpected application error
+`200` Successful request or idempotent replay  
+`201` Resource or purchase attempt created  
+`400` Request body is not valid JSON  
+`404` Account or card does not exist  
+`409` Request conflicts with current state  
+`422` Invalid input  
+`503` Database is temporarily busy and the request may be retried  
+`500` Unexpected application error
 
 A declined purchase can still return `201` because the authorization attempt itself was successfully processed.
 
@@ -353,7 +303,7 @@ app/
   limits.py        Contribution limits used by the simplified model
   money.py         Dollar strings to integer cents and back
   common.py        Shared IDs, time, and input helpers
-  static/          HTML, CSS, JavaScript, and bundled fonts
+  static/          HTML, CSS, and JavaScript
 
 tests/
   test_business_rules.py   Single-request business rules
@@ -372,11 +322,11 @@ scripts/
 
 AI was used extensively during development.
 
-See [ai-usage.md](ai-usage.md) for how I reviewed the generated implementation, what I personally ran and changed, and what I verified before submission.
+See [ai-usage.md](ai-usage.md) for how I used Claude, where I questioned or changed generated work, and how I verified the final implementation.
 
 ---
 
 ## Demo video
 
-Video: https://drive.google.com/file/d/1F3A-BKOTk8_-cuIIecCchVJG76V4Yd9Q/view?usp=sharing
+[View demo video](https://drive.google.com/file/d/1F3A-BKOTk8_-cuIIecCchVJG76V4Yd9Q/view?usp=sharing)
 
