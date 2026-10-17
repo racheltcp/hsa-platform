@@ -1,136 +1,169 @@
-# AI usage
+# AI Usage
 
-> **TODO before submitting:** drafted by Claude from the actual build conversation, with
-> each action credited to whoever really did it. The *TODO* items need your own words:
-> what you personally read, questioned, changed and re-ran. Delete this note when done.
+I used Claude heavily while building this project. It generated most of the initial implementation, tests, and documentation.
 
-## Tools used
+Since AI use was expected for the assignment, the part I spent the most time on was figuring out what I could actually trust.
 
-| Tool | Used for |
-| --- | --- |
-| **Claude (Opus 5.5, in claude.ai with code execution)** | Design, all code, tests and docs, and running the checks (test suite, mutation check, browser walkthrough) in its sandbox |
-| *TODO: anything else you used, or delete this row* | |
+I kept coming back to the same question: if the project is making a claim, what evidence do I have that the claim is true?
 
-## Who did what
+It was not enough for the project to work only in Claude's environment. A green test suite was not enough if the tests never exercised the failure case. A concurrency demo was not useful if the visualization did not match what the backend was actually doing. And an error response was not enough if the rejected request could still leave the database in the wrong state.
 
-Being plain about this: Claude wrote essentially every file. My part was directing it,
-running the project on my own machine, pushing back when results weren't good enough, and
-deciding what had to be proven before I'd submit it.
+That shaped how I reviewed the rest of the project.
 
-| | Claude | Me |
-| --- | --- | --- |
-| Build | Chose the stack, wrote the backend, UI, tests and docs | Gave it the assignment and asked it to build the project |
-| Running locally | Tested on Python 3.13 in its sandbox | Ran it on my MacBook, hit a crash at startup, and reported it (below) |
-| Concurrency proof | Added a naive-code control test and the mutation check on its own initiative | *TODO: whether you've run `python scripts/mutation_check.py` yourself* |
-| UI | Built two versions; ran browser walkthroughs and reviewed its own screenshots | Said the first version looked generic; sent screenshots from my machine |
-| Review | Did a critical review on request; found and fixed the bugs listed below | Asked for a critical, ranked review and said not to settle for "looks good" |
-| Domain facts | Looked up the 2026 IRS limits with a web search | *TODO: if you checked anything yourself* |
+## Running it outside Claude's environment
 
-## Representative prompts and workflows
+One of the first problems showed up when I tried to run the project on my Mac.
 
-**1. Build it from the brief.** I attached the assignment PDF and asked Claude to do the
-project. Its sandbox couldn't reach PyPI, so it switched from FastAPI to Flask, which was
-already installed, plus the standard library's `sqlite3` and `unittest`. That turned out
-well for reviewers: one dependency and no build step.
+Claude had tested it using a newer Python version, while I was using Python 3.9.6. The app crashed because some of the generated type syntax was not compatible with my environment.
 
-**2. Prove the tests can fail.** All the tests passed on the first run, and Claude treated
-that as suspicious rather than reassuring. A concurrency test proves nothing if it would
-also pass against broken code, for example if the threads never overlap. So it added:
-- a control test that runs a deliberately naive purchase under the same harness and checks
-  that it *does* double-spend;
-- `scripts/mutation_check.py`, which removes each safety mechanism in a copy of the code
-  and confirms the concurrency tests fail.
+I did not diagnose that compatibility issue myself, but I surfaced it by actually running the project outside Claude's environment. I sent the failure back, applied the fix, and ran it again locally.
 
-**3. "It looks generic. Will it impress anyone?"** I pushed back on the first UI. Claude
-agreed it was a template-style dashboard and rebuilt it around what the system actually
-does: lock timings measured on the server, drawn as a timeline, and a printed decision trace
-for every purchase. One fix came from a screenshot I sent. I'd raced $80 and $50 against
-$198.57, both were approved, and the "race" showed nothing. The panel now warns when the
-amounts can't compete and offers amounts that will.
+That was an early example of why I did not want the environment that generated the code to be the only environment verifying it.
 
-**4. "Be critical. Find what I missed."** I asked for a ranked review of the whole project
-covering correctness, concurrency, idempotency, tests and UX, with real fixes rather than
-cosmetic ones. The bugs it found are below.
+## Understanding the system
 
-**5. "The dashboard still looks basic next to the homepage."** I asked for a critical
-design review of the account dashboard, with before-and-after screenshots and no backend
-changes. Claude screenshotted the existing dashboard from a scripted scenario, listed what
-was wrong (an unconnected summary, three "Issue card" buttons, a decline reason buried in
-row 4, timeline bars coloured by outcome rather than by lock state, declined amounts that
-looked charged), redesigned it, and replayed the same scenario for the "after" shots.
+I also did not want to treat the generated implementation as a black box.
 
-*TODO: add a prompt of your own, such as a question you asked to understand part of the design.*
+The project is a Flask application backed by SQLite. The main pieces are separated by responsibility: accounts and contributions, cards, purchases, database and transaction handling, merchant eligibility, money parsing, and the HTTP layer.
 
-## Where the AI's output was wrong, and how it was caught
+I went through those pieces so I could follow an operation from the HTTP request to the state that was actually persisted.
 
-### 1. A wrong explanation of why the system was safe
+Accounts hold the current balance and identify the owner. Contributions are stored as individual records instead of only keeping an accumulated number, so the history behind the annual total is still available.
 
-The first version of the purchase code said the conditional `UPDATE` keeps the balance safe
-"even if the surrounding transaction were weakened later". In other words, the lock was
-optional. The mutation check disproved it. With the lock removed:
-- purchases were still safe, but
-- 20 simultaneous $300 deposits were all accepted, $6,000 against a $4,400 limit;
-- simultaneous retries with the same key crashed instead of returning the original result.
+Cards are separate because they have their own lifecycle. A card can be active, frozen, cancelled, or replaced without replacing the account.
 
-The lock is the essential guarantee; the conditional `UPDATE` is a backstop. The code was
-right but its explanation was wrong, which is exactly what an interviewer's "what if you
-removed X?" would expose.
+Purchase attempts are persisted even when they are declined. No money moves on a decline, but the authorization still happened. Keeping it means the activity history can show what was attempted and why it stopped.
 
-### 2. Bugs found in the critical review (all now fixed, each with a regression test)
+Money is stored as integer cents instead of floating-point dollars so financial calculations do not depend on binary floating-point behavior.
 
-| Problem | How it showed up | Fix |
-| --- | --- | --- |
-| The check order was written in two places: once for the decision, once for the explanation | Code reading. Nothing kept them in sync | One ordered `CHECKS` list that both read; a test makes each check fail alone |
-| An amount of `1e999999999` crashed the server with an HTML 500 | Probing the API | Bounds checked before any arithmetic. The first fix then let `1e-999999999` through as 0 cents, caught by the edge-value probe and fixed |
-| Retrying a purchase with a different merchant name returned the old result | Probing the API | Retries must match amount, category *and* merchant |
-| Retry keys were global, so account B got a 409 for a key account A had used | Probing the API | Keys scoped per card and per account in the schema |
-| Any crash, or a busy database, returned an HTML page the UI couldn't read | Probing the API | Every error is JSON with a readable message; busy is a 503 |
-| Malformed JSON was reported as "holder_name is required" | Probing the API | Its own 400 error |
-| An account "closed" state that nothing could ever reach | Code reading | Removed, with its dead decline branch |
-| The "threads really overlapped" test only asserted a wait of more than 0 ms | Code reading | Now asserts most requests queued behind another lock holder |
-| Timings used the wall clock, which can jump | Code reading | Monotonic `perf_counter` |
-| The "Use $60 and $38 instead" button sometimes ignored clicks | Found by the browser walkthrough | Redraw the hint only when its text changes |
-| Error messages used code names ("date_of_birth must be…") and vanished in a toast | UX review | Plain-language messages shown next to the field |
+I also spent time understanding the idempotency path.
 
-### 3. A bug Claude introduced in the dashboard redesign, and caught
+A timeout does not tell the caller whether the operation happened. The server might have completed it and the response might simply have been lost.
 
-The new activity list showed the deposit icon's "+" about 85 px outside its circle. Claude's
-first guess, a broken glyph in the bundled font, was wrong: a test page rendered "+" fine at
-every weight. Measuring the element showed a CSS rule named `.deposit`, written for the
-*deposit form*, also matched the icon (class `item-icon deposit`) and gave it the form's
-grid layout. The form's class was renamed, and the browser test now checks that every icon
-draws inside its circle. Claude confirmed that check fails when the collision is put back.
-The redesigned race timeline had a similar edge case: the decision mark for the last
-purchase overflowed its track on a phone. It now has its own space, also covered by a check.
+Without idempotency, retrying that request could create a second purchase or contribution. The key gives the application a way to recognize that it has already handled the same logical operation.
 
-### 4. Problems found earlier
+## Challenging a green test suite
 
-- **Didn't run on a stock Mac.** Code that needed Python 3.10 crashed at startup on my
-  MacBook's Python 3.9.6. Claude had only tested on 3.13. Fixed, and it now reruns
-  everything on a real 3.9 interpreter. The default port also moved from 5000 to 8000,
-  because macOS's AirPlay Receiver uses 5000.
-- **Floats in money formatting.** Display used `cents / 100`; replaced with integer-only formatting.
-- **Stale screen state** after switching accounts, found in Claude's own screenshots.
-- **An unverifiable citation.** An early draft cited IRS document numbers from memory; it
-  was replaced with a plain description, and the dollar figures were checked by web search.
-- **Fonts from Google** were blocked in the sandbox and wouldn't load offline; the font is now bundled.
+The area I pushed on the hardest was correctness.
 
-*TODO: anything you found yourself belongs here, and it's worth more than everything above.*
+At one point the project had 42 passing tests. I specifically told Claude not to assume that meant the implementation was correct.
 
-## How the final implementation was verified
+I asked it to take another look at transaction correctness, concurrency, idempotency, database consistency, and whether the tests actually supported the claims we were making about the system.
 
-What Claude ran, in its sandbox, after the last change:
-1. `python -m unittest discover -s tests -t .`: 48 tests passing, on Python 3.13 and on 3.9.
-   The concurrency tests were repeated 10 times on 3.13 and 5 times on 3.9 to check for
-   flakiness. They cover the brief's race 50 times, 40 purchases at once, a lock-timing
-   proof, a random mix of 90 operations across 3 accounts, and 30 simultaneous HTTP requests.
-2. `python scripts/mutation_check.py`: the tests fail for every unsafe variant.
-3. `python scripts/e2e_check.py`: 39 browser checks covering every flow, each error message,
-   desktop and phone widths, an XSS attempt, layout regressions, and the server being
-   stopped mid-session.
-4. An old database from the previous version: the app refuses it with a clear message.
+A test can be green without ever reaching the failure case that matters.
 
-What I verified myself:
-- I ran the app on my MacBook (Python 3.9.6) and used it through the browser.
-- *TODO: list what you actually did, e.g. "Read purchases.py and db.py line by line; ran the
-  test suite, mutation check and e2e check on my Mac; worked through the review questions."*
+That deeper review found several problems I had not found myself. I do not want to take credit for those individual discoveries.
+
+What I did do was ask for the implementation to be challenged instead of simply validated, work through what came back, and rerun the project and tests instead of treating the fix as the end of the investigation.
+
+## Understanding the concurrency path
+
+Claude chose the original locking strategy, including `BEGIN IMMEDIATE` and the conditional balance update.
+
+I went back through that part of the code because I wanted to understand what each protection was actually doing.
+
+The simplest race is an account with $100 and two purchases arriving around the same time, one for $80 and one for $50.
+
+If both requests read the original $100 and make their decisions independently, both could approve even though the account cannot cover $130.
+
+For a purchase, the balance update is conditional. The debit only succeeds if enough money is still available when the update executes. That protects the individual balance change.
+
+The contribution path helped me understand why an atomic update is not enough for every invariant.
+
+That operation has to read how much has already been contributed, decide whether another contribution is allowed, and then write it.
+
+If another writer can change the state between those steps, every SQL statement could be valid on its own while the overall decision is still based on stale information.
+
+My understanding of `BEGIN IMMEDIATE` is that SQLite starts the write transaction before that read-decide-write sequence begins, so another writer cannot change the database in the middle of the decision.
+
+I think of that transaction and the conditional balance update as related protections, but not identical ones. The conditional update protects an individual debit. The transaction protects a larger decision that depends on state that was read earlier.
+
+There is a tradeoff.
+
+SQLite's writer lock is broad, so unrelated accounts can still block one another. For this project, that keeps the concurrency model relatively simple to inspect. At a larger scale on something like Postgres, I would want to investigate more targeted locking such as row-level locks instead of assuming this design should carry over unchanged.
+
+## Checking whether the tests notice when protection disappears
+
+I also ran the concurrency mutation check myself.
+
+Claude had already created the mutation testing, so that was not my idea.
+
+What I found useful about it was that it changed the question.
+
+Instead of only asking whether the final implementation passes, it deliberately weakens specific concurrency protections and asks whether the tests notice.
+
+When I ran it locally, the intentionally naive concurrency version did not fail exactly the same number of tests on my Mac as it did in Claude's environment.
+
+That made sense because thread scheduling is timing-dependent.
+
+I was not trying to reproduce an exact failure count. The result I cared about was that weakening the protections caused the relevant tests to stop passing.
+
+I also would not call that proof that the implementation is correct. It is evidence that the suite detects several specific unsafe alternatives. There could still be failure modes those mutations do not represent.
+
+## A final API change
+
+During final review, Claude pointed out another issue in the card-issuance route.
+
+The endpoint was converting the incoming `replace` value with Python's `bool()` function.
+
+I went through the behavior and realized that a non-empty string is treated as `True` in Python, even when the text inside that string says false.
+
+For this endpoint, that has a real consequence. If a client sends false as a string instead of an actual JSON boolean, the server could interpret it as permission to cancel the customer's current card and issue a replacement.
+
+I did not want the server guessing in a path with that kind of side effect.
+
+I changed the route in my local repository so `replace` only accepts an actual JSON boolean. If the field is missing, it defaults to `false`. If the caller sends a string instead of a real boolean, the request now returns `422`.
+
+I also added the regression test.
+
+I did not stop at checking the status code.
+
+After sending the invalid request, the test fetches the account again and checks that the original card is still active. It then sends an actual JSON `true` and verifies that valid replacement still works.
+
+The important part was making sure the rejected request could not change the customer's card.
+
+After the change, I reran the full test suite and mutation check locally.
+
+## Making sure the UI did not overstate the backend
+
+I pushed back on the generated UI several times too.
+
+The first dashboard technically worked, but it still looked like separate white boxes instead of one account. I wanted the balance, contributions, card, and activity to feel connected.
+
+The concurrency visualization was the part where I cared most about accuracy.
+
+I specifically asked for it to distinguish between a request waiting for the lock, actually holding the lock, and its final approved or declined result.
+
+Those are different states. A request can be waiting without owning the lock yet, and its eventual transaction result is separate again.
+
+I explicitly told Claude not to prioritize visual appearance over accurately representing the concurrency behavior.
+
+That feedback led to another problem being found in how the timeline represented those states. Claude found the specific implementation issue, but the reason I kept pushing on it was that I did not want the demo to visually claim behavior that the backend was not actually providing.
+
+I also tested the UI directly in my browser.
+
+One example was the date-of-birth validation. After that interaction changed, I checked that the error appeared below the field and cleared after the date changed.
+
+## Production considerations
+
+I would not call this production-ready just because the take-home works.
+
+The HSA rules are simplified. In a real financial product, I would want the actual regulatory requirements and edge cases reviewed with people who know that domain before treating my assumptions as authoritative.
+
+I would also revisit the SQLite locking strategy at production scale rather than assuming the same approach should carry over unchanged.
+
+The tests and mutation check give me evidence for the cases they cover, but in production I would still want observability around retries, lock contention, unexpected declines, and failures that are difficult to reproduce locally.
+
+Those are areas where I would want more context before making a production decision.
+
+## Final review
+
+Before submitting, I reran the full test suite and mutation check and went back through the parts of the code I thought carried the most risk.
+
+The areas I paid the most attention to were concurrency, idempotency, input validation, and whether the tests were actually checking the state the application claimed to protect.
+
+I also made sure I could follow the important paths through the code and explain what each protection was doing instead of only knowing that the generated implementation passed its tests.
+
+There are still things I would revisit in a production system, especially the simplified HSA rules, SQLite locking at a larger scale, and production observability around retries and lock contention.
+
+For this take-home, the main thing I wanted was enough evidence behind the important claims that I could explain why I trusted them and where I still would not.
