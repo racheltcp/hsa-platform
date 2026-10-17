@@ -4,7 +4,7 @@ A small Health Savings Account simulator built with Flask and SQLite.
 
 The application lets a user create an account, contribute funds, issue and manage a virtual card, and authorize purchases while keeping account state correct under concurrent requests.
 
-The HSA rules represented here are intentionally simplified for the take-home. This is a software engineering exercise, not a complete HSA compliance system.
+The HSA rules in this project are simplified to match the scope of the take-home.
 
 **Backend:** Python 3.9+, Flask, SQLite (`sqlite3`, no ORM)  
 **Frontend:** Plain HTML, CSS, and JavaScript served by Flask  
