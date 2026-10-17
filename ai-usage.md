@@ -176,4 +176,4 @@ At a larger scale, I would investigate a database such as Postgres and more targ
 
 I would also want better production observability around retries, lock contention, unexpected declines, and failures that are difficult to reproduce locally.
 
-Before submitting, I wanted to make sure I could explain why the important protections were there, what the tests were actually checking, and which parts I would still want more information or expertise on before making a production decision.
+Before submitting, I wanted to make sure I could explain why the important protections were there, what the tests were checking, and which parts I would still want more information on before making a production decision.
