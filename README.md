@@ -163,7 +163,9 @@ The transaction and the conditional update protect different parts of the operat
 
 SQLite's writer lock is broad, so unrelated writes can still block one another.
 
-For this project, that keeps the concurrency model small enough to inspect directly. For a larger production service, I would evaluate a database such as Postgres and more targeted concurrency control, including row-level locking.
+For this project, that keeps the concurrency model small enough to inspect directly. For a larger production service, I would evaluate a database such as PostgreSQL and more targeted concurrency control, including row-level locking.
+
+I would also add authentication and authorization to protect account information and transactions, along with more detailed monitoring to help identify failed transactions and performance issues.
 
 See [architecture.md](architecture.md) for the full request flow, data model, and concurrency design.
 
